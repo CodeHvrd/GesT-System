@@ -18,8 +18,15 @@
         <p id="freshness" class="fresh">Resumen de gestión</p>
         <div class="ver-row">
           <span id="ver-top" class="ver-pill">v—</span>
+          <button type="button" id="btn-sync-fudo" class="ver-btn" title="Traer ventas y gastos recientes desde la API de Fudo">↻ Sincronizar Fudo</button>
           <button type="button" id="btn-update-top" class="ver-btn" title="Sincronizar con el último commit de GitHub">↻ Forzar última versión</button>
         </div>
+        <form id="fudo-creds-form" class="fudo-creds" hidden autocomplete="off">
+          <input type="text" name="api_key" placeholder="Fudo API Key" required>
+          <input type="password" name="api_secret" placeholder="Fudo API Secret" required>
+          <button type="submit" class="btn">Guardar y sincronizar</button>
+        </form>
+        <p id="sync-msg" class="sync-msg" hidden></p>
       </div>
     </div>
     <div class="period">

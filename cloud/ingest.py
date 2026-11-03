@@ -84,16 +84,48 @@ def _mode(items: list[dict], total: float) -> str:
     return "unidad"
 
 
-def client_from_env() -> FudoClient:
-    cfg = {
-        "fudo": {
-            "api_key": os.environ.get("FUDO_API_KEY", ""),
-            "api_secret": os.environ.get("FUDO_API_SECRET", ""),
-        }
-    }
+def save_credentials(pg, venue_id: int, api_key: str, api_secret: str) -> None:
+    pg.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fudo_credentials (
+            venue_id       bigint PRIMARY KEY REFERENCES venues(id) ON DELETE CASCADE,
+            api_key_enc    text NOT NULL,
+            api_secret_enc text NOT NULL,
+            updated_at     timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    pg.execute(
+        """
+        INSERT INTO fudo_credentials (venue_id, api_key_enc, api_secret_enc, updated_at)
+        VALUES (%s, %s, %s, now())
+        ON CONFLICT (venue_id) DO UPDATE
+          SET api_key_enc = EXCLUDED.api_key_enc,
+              api_secret_enc = EXCLUDED.api_secret_enc,
+              updated_at = now()
+        """,
+        (venue_id, api_key.strip(), api_secret.strip()),
+    )
+
+
+def client_from_env(pg=None, venue_id: int | None = None) -> FudoClient:
+    api_key = (os.environ.get("FUDO_API_KEY") or "").strip()
+    api_secret = (os.environ.get("FUDO_API_SECRET") or "").strip()
+    if (not api_key or not api_secret) and pg is not None and venue_id is not None:
+        try:
+            row = pg.execute(
+                "SELECT api_key_enc, api_secret_enc FROM fudo_credentials WHERE venue_id = %s",
+                (venue_id,),
+            ).fetchone()
+            if row:
+                api_key = api_key or (row["api_key_enc"] or "").strip()
+                api_secret = api_secret or (row["api_secret_enc"] or "").strip()
+        except Exception:  # noqa: BLE001
+            pg.rollback()
+    cfg = {"fudo": {"api_key": api_key, "api_secret": api_secret}}
     client = FudoClient(cfg)
     if not client.configured:
-        raise SystemExit("Faltan FUDO_API_KEY y FUDO_API_SECRET (ponelas en .env).")
+        raise SystemExit("Faltan FUDO_API_KEY y FUDO_API_SECRET.")
     return client
 
 

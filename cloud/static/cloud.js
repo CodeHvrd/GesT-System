@@ -473,6 +473,38 @@ async function forceUpdate() {
   }
 }
 
+async function syncFudo(extra = {}) {
+  const btn = $('#btn-sync-fudo');
+  const msg = $('#sync-msg');
+  const form = $('#fudo-creds-form');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sincronizando Fudo…'; }
+  if (msg) { msg.hidden = false; msg.textContent = 'Consultando ventas y gastos en Fudo…'; }
+  try {
+    const res = await fetch('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ days: 10, ...extra }),
+    });
+    const json = await res.json();
+    if (!json.ok) {
+      if (json.needs_credentials && form) {
+        form.hidden = false;
+        if (msg) msg.textContent = 'Ingresá tu API Key y API Secret de Fudo por única vez (se guardan en la base):';
+        return;
+      }
+      throw new Error(json.error || 'No se pudo sincronizar con Fudo');
+    }
+    if (form) form.hidden = true;
+    const v = (json.data && json.data.ventas) || {};
+    if (msg) msg.textContent = `Fudo sincronizado (${v.written ?? 0} ventas actualizadas).`;
+    await load(true);
+  } catch (err) {
+    if (msg) { msg.hidden = false; msg.textContent = `Error Fudo: ${err.message}`; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Sincronizar Fudo'; }
+  }
+}
+
 /* ------------------------------------------------------------------ eventos */
 document.querySelectorAll('[data-preset]').forEach((b) => {
   b.addEventListener('click', () => applyPreset(b.dataset.preset));
@@ -491,6 +523,14 @@ $('#ext-kind').addEventListener('change', syncFormKind);
 $('#ext-form').addEventListener('submit', addExternal);
 if ($('#btn-update')) $('#btn-update').addEventListener('click', forceUpdate);
 if ($('#btn-update-top')) $('#btn-update-top').addEventListener('click', forceUpdate);
+if ($('#btn-sync-fudo')) $('#btn-sync-fudo').addEventListener('click', () => syncFudo());
+if ($('#fudo-creds-form')) {
+  $('#fudo-creds-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const data = Object.fromEntries(new FormData(ev.currentTarget).entries());
+    syncFudo(data);
+  });
+}
 document.addEventListener('click', (ev) => {
   const btn = ev.target.closest('[data-del]');
   if (btn) removeExternal(btn.dataset.del, btn.dataset.kind);

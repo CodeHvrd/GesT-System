@@ -14,33 +14,28 @@ import os
 import sys
 import time
 import traceback
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import db, ingest, recompute
 
 ART = timezone(timedelta(hours=-3))
 
 
-def run_once(days: int = 7, venue: str = "bois") -> dict:
+def run_once(days: int = 7, venue: str = "bois", direct: bool = True) -> dict:
     db.load_env(".env")
-    missing = [
-        k for k in ("FUDO_API_KEY", "FUDO_API_SECRET") if not (os.environ.get(k) or "").strip()
-    ]
     if not (os.environ.get("DATABASE_URL_DIRECT") or os.environ.get("DATABASE_URL") or "").strip():
-        missing.append("DATABASE_URL_DIRECT / DATABASE_URL")
-    if missing:
-        msg = f"Faltan variables/secretos en GitHub Actions o .env: {', '.join(missing)}"
+        msg = "Falta DATABASE_URL_DIRECT / DATABASE_URL en GitHub Secrets/Variables o .env"
         print(f"::error title=Configuracion faltante::{msg}", flush=True)
         raise SystemExit(msg)
 
-    client = ingest.client_from_env()
     d1 = datetime.now(ART).date()
     d0 = d1 - timedelta(days=days)
     out: dict = {"rango": f"{d0}..{d1}"}
-    with db.connect(direct=True) as pg:
+    with db.connect(direct=direct) as pg:
         db.apply_schema(pg)
         vid = db.ensure_venue(pg, venue)
         pg.commit()
+        client = ingest.client_from_env(pg, vid)
         try:
             out["ventas"] = ingest.sync_sales(pg, vid, client, d0, d1)
             pg.commit()

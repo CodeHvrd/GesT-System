@@ -17,16 +17,17 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import analytics_pg as an
-from . import db
+from . import db, ingest, recompute
 
 STATIC = Path(__file__).resolve().parent / "static"
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -63,7 +64,70 @@ HotReloadFiles = (
     "cloud/static/cloud.css",
     "cloud/static/cloud.js",
     "cloud/analytics_pg.py",
+    "cloud/ingest.py",
+    "cloud/worker.py",
 )
+
+_sync_lock = threading.Lock()
+
+
+def sync_fudo_now(payload: dict | None = None, days: int = 10) -> dict:
+    """Sincroniza ventas y gastos de Fudo hacia Postgres desde el propio servidor."""
+    payload = payload or {}
+    api_key = str(payload.get("api_key") or "").strip()
+    api_secret = str(payload.get("api_secret") or "").strip()
+    days = max(1, min(60, int(payload.get("days") or days)))
+
+    if not _sync_lock.acquire(blocking=False):
+        return {"ok": False, "error": "Ya hay una sincronización en curso. Esperá unos segundos."}
+    try:
+        d1 = an.today_ar()
+        d0 = d1 - timedelta(days=days)
+        with db.connect() as pg:
+            vid = db.ensure_venue(pg, "bois")
+            if api_key and api_secret:
+                ingest.save_credentials(pg, vid, api_key, api_secret)
+                pg.commit()
+            try:
+                client = ingest.client_from_env(pg, vid)
+            except SystemExit:
+                return {
+                    "ok": False,
+                    "needs_credentials": True,
+                    "error": "Faltan las credenciales de Fudo (API Key y API Secret).",
+                }
+            ventas = ingest.sync_sales(pg, vid, client, d0, d1)
+            pg.commit()
+            try:
+                gastos = ingest.sync_expenses(pg, vid, client, d0, d1)
+                pg.commit()
+            except Exception as exc:  # noqa: BLE001
+                pg.rollback()
+                gastos = {"status": "error", "error": str(exc)}
+            agregados = recompute.recompute(pg, vid)
+            pg.commit()
+        return {
+            "ok": True,
+            "data": {
+                "rango": f"{d0.isoformat()} → {d1.isoformat()}",
+                "ventas": ventas,
+                "gastos": gastos,
+                "agregados": agregados,
+            },
+        }
+    finally:
+        _sync_lock.release()
+
+
+def _auto_sync_loop(interval_sec: int = 900) -> None:
+    """Sincroniza en segundo plano cada 15 min si hay credenciales configuradas."""
+    time.sleep(8)
+    while True:
+        try:
+            sync_fudo_now(days=5)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(interval_sec)
 
 
 def _github_latest() -> dict:
@@ -238,13 +302,20 @@ class Handler(BaseHTTPRequestHandler):
         if not self._write_guard():
             return
         try:
-            if urlparse(self.path).path == "/api/update":
+            path = urlparse(self.path).path
+            if path == "/api/update":
                 try:
                     self._json({"ok": True, "data": check_update()})
                 except Exception:  # noqa: BLE001
                     self._error(502, "no se pudo consultar GitHub o actualizar archivos")
                 return
-            if urlparse(self.path).path != "/api/external":
+            if path == "/api/sync":
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if 0 < length <= 10_000 else {}
+                res = sync_fudo_now(body if isinstance(body, dict) else {})
+                self._json(res, 200 if res.get("ok") else (428 if res.get("needs_credentials") else 400))
+                return
+            if path != "/api/external":
                 self._error(404, "endpoint desconocido")
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -346,6 +417,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     db.load_env(".env")
+    threading.Thread(target=_auto_sync_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Portal GesT · http://{HOST}:{PORT}")
     try:

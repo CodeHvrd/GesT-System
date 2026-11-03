@@ -860,3 +860,114 @@ def expenses_cross(conn, venue_id: int, months: int = 6) -> list[dict]:
         )
         cursor = (cursor - timedelta(days=1)).replace(day=1)
     return out
+
+
+# ------------------------------------------------------------------ sync Fudo en vivo y hot-patch
+import importlib as _importlib
+import json as _json
+import os as _os
+import sys as _sys
+import threading as _threading
+import urllib.request as _urlreq
+from pathlib import Path as _Path
+from urllib.parse import urlparse as _urlparse
+
+_fudo_sync_lock = _threading.Lock()
+
+
+def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
+    """Sincroniza ventas y gastos de Fudo hacia Postgres desde el servidor web."""
+    from . import db as _db, ingest as _ingest, recompute as _recompute
+
+    # Si ingest.py en el contenedor era de una versión previa sin save_credentials, lo actualiza en caliente
+    if not hasattr(_ingest, "save_credentials"):
+        try:
+            repo = _os.environ.get("GITHUB_REPO", "CodeHvrd/GesT-System")
+            branch = _os.environ.get("GITHUB_BRANCH", "main")
+            raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/cloud/ingest.py"
+            req = _urlreq.Request(raw_url, headers={"User-Agent": "gest-system"})
+            with _urlreq.urlopen(req, timeout=10) as resp:
+                content = resp.read()
+            dest = (_Path(__file__).resolve().parent / "ingest.py").resolve()
+            if content:
+                dest.write_bytes(content)
+                _importlib.reload(_ingest)
+        except Exception:  # noqa: BLE001
+            pass
+
+    payload = payload or {}
+    api_key = str(payload.get("api_key") or "").strip()
+    api_secret = str(payload.get("api_secret") or "").strip()
+    days = max(1, min(60, int(payload.get("days") or days)))
+
+    if not _fudo_sync_lock.acquire(blocking=False):
+        return {"ok": False, "error": "Ya hay una sincronización en curso. Esperá unos segundos."}
+    try:
+        d1 = today_ar()
+        d0 = d1 - timedelta(days=days)
+        with _db.connect() as pg:
+            vid = _db.ensure_venue(pg, "bois")
+            if api_key and api_secret and hasattr(_ingest, "save_credentials"):
+                _ingest.save_credentials(pg, vid, api_key, api_secret)
+                pg.commit()
+            try:
+                client = _ingest.client_from_env(pg, vid)
+            except TypeError:
+                client = _ingest.client_from_env()
+            except SystemExit:
+                return {
+                    "ok": False,
+                    "needs_credentials": True,
+                    "error": "Faltan las credenciales de Fudo (API Key y API Secret).",
+                }
+            ventas = _ingest.sync_sales(pg, vid, client, d0, d1)
+            pg.commit()
+            try:
+                gastos = _ingest.sync_expenses(pg, vid, client, d0, d1)
+                pg.commit()
+            except Exception as exc:  # noqa: BLE001
+                pg.rollback()
+                gastos = {"status": "error", "error": str(exc)}
+            agregados = _recompute.recompute(pg, vid)
+            pg.commit()
+        return {
+            "ok": True,
+            "data": {
+                "rango": f"{d0.isoformat()} → {d1.isoformat()}",
+                "ventas": ventas,
+                "gastos": gastos,
+                "agregados": agregados,
+            },
+        }
+    finally:
+        _fudo_sync_lock.release()
+
+
+def _patch_live_handler() -> None:
+    """Inyecta /api/sync en el Handler en ejecución cuando se recarga analytics_pg en caliente."""
+    for mod in list(_sys.modules.values()):
+        cls = getattr(mod, "Handler", None)
+        if cls is None or not hasattr(cls, "do_POST"):
+            continue
+        orig_post = getattr(cls, "_orig_do_post", cls.do_POST)
+        cls._orig_do_post = orig_post
+
+        def _patched_do_post(self, _orig=orig_post):
+            if _urlparse(self.path).path == "/api/sync":
+                if not self._write_guard():
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = _json.loads(self.rfile.read(length).decode("utf-8")) if 0 < length <= 10_000 else {}
+                    res = sync_fudo_live(body if isinstance(body, dict) else {})
+                    status = 200 if res.get("ok") else (428 if res.get("needs_credentials") else 400)
+                    self._json(res, status)
+                except Exception as exc:  # noqa: BLE001
+                    self._error(500, f"error sincronizando Fudo: {exc}")
+                return
+            return _orig(self)
+
+        cls.do_POST = _patched_do_post
+
+
+_patch_live_handler()

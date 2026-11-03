@@ -473,7 +473,7 @@ async function forceUpdate() {
   }
 }
 
-async function syncFudo(extra = {}) {
+async function syncFudo(extra = {}, _retried = false) {
   const btn = $('#btn-sync-fudo');
   const msg = $('#sync-msg');
   const form = $('#fudo-creds-form');
@@ -487,6 +487,15 @@ async function syncFudo(extra = {}) {
     });
     const json = await res.json();
     if (!json.ok) {
+      if (!_retried && (res.status === 404 || String(json.error || '').includes('desconocido'))) {
+        if (msg) msg.textContent = 'Actualizando servidor en vivo…';
+        await fetch('/api/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: '{}',
+        });
+        return await syncFudo(extra, true);
+      }
       if (json.needs_credentials && form) {
         form.hidden = false;
         if (msg) msg.textContent = 'Ingresá tu API Key y API Secret de Fudo por única vez (se guardan en la base):';

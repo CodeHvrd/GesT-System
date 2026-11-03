@@ -104,12 +104,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         path = url.path
-        if path != "/healthz" and not self._authorized():
+        if path not in ("/healthz", "/readyz") and not self._authorized():
             self._unauthorized()
             return
         try:
             if path == "/healthz":
                 self._json({"ok": True})
+                return
+            if path == "/readyz":
+                try:
+                    with db.connect() as pg:
+                        pg.execute("SELECT 1").fetchone()
+                    self._json({"ok": True, "db": "ok"})
+                except Exception:  # noqa: BLE001
+                    self._json({"ok": False, "db": "error"}, 503)
                 return
             if path == "/api/dashboard":
                 qs = parse_qs(url.query)

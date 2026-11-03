@@ -128,6 +128,23 @@ En Render: **New → Web Service → Docker**, conectando este repo. El archivo
 | `PORTAL_USER` / `PORTAL_PASS` | acceso al portal (Basic Auth) |
 | `PORT` | lo define el host |
 
+### Sincronización automática (opcional, gratis)
+
+El repo incluye `.github/workflows/sync.yml`. Para que Neon se mantenga al día:
+
+1. En GitHub → **Settings → Secrets and variables → Actions**, cargá:
+   - `DATABASE_URL_DIRECT` (la cadena directa de Neon)
+   - `FUDO_API_KEY`
+   - `FUDO_API_SECRET`
+2. En `.github/workflows/sync.yml`, descomentá el bloque `schedule`.
+3. Listo: cada 15 minutos corre `cloud.worker --once --days 2`.
+
+También podés correrlo a mano desde la pestaña **Actions → sync-fudo → Run workflow**.
+En repos públicos los minutos de Actions no se cobran.
+
+Alternativas: Task Scheduler en tu PC (`python -m cloud.worker --once`) o un cron
+job pago en Render.
+
 ## Seguridad
 
 - `config.json` y `.env` están en `.gitignore`: no se commitean.

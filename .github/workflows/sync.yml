@@ -1,0 +1,25 @@
+name: sync-fudo
+
+on:
+  workflow_dispatch:
+  # Descomentá el schedule cuando estén cargados los secretos del repo:
+  # schedule:
+  #   - cron: "*/15 * * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: python -m pip install --quiet -r cloud/requirements.txt
+      - name: Sincronizar Fudo → Postgres
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT }}
+          FUDO_API_KEY: ${{ secrets.FUDO_API_KEY }}
+          FUDO_API_SECRET: ${{ secrets.FUDO_API_SECRET }}
+        run: python -m cloud.worker --once --days 2

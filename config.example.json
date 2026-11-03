@@ -1,0 +1,16 @@
+{
+  "sheet_id": "TU_SHEET_ID",
+  "sheet_url": "https://docs.google.com/spreadsheets/d/TU_SHEET_ID/edit",
+  "restaurant": "Mi local",
+  "google_api_key": "",
+  "fudo": {
+    "api_key": "",
+    "api_secret": "",
+    "auth_url": "https://auth.fu.do/api",
+    "base_url": "https://api.fu.do/v1alpha1"
+  },
+  "webhook_url": "",
+  "webhook_token": "",
+  "auto_sync_minutes": 15,
+  "weeks": "month"
+}

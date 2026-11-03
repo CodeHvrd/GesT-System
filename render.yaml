@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: gest-system
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PORTAL_USER
+        sync: false
+      - key: PORTAL_PASS
+        sync: false

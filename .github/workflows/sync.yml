@@ -2,9 +2,8 @@ name: sync-fudo
 
 on:
   workflow_dispatch:
-  # Descomentá el schedule cuando estén cargados los secretos del repo:
-  # schedule:
-  #   - cron: "*/15 * * * *"
+  schedule: 
+    - cron: "*/15 * * * *"
 
 jobs:
   sync:

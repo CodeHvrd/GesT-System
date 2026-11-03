@@ -100,6 +100,63 @@ class Handler(BaseHTTPRequestHandler):
         cache = "no-store" if target.suffix == ".html" else "public, max-age=120"
         self._send(200, target.read_bytes(), ctype, cache)
 
+    # -------------------------------------------------------------- escritura
+    def _write_guard(self) -> bool:
+        """Auth + solo JSON (obliga a preflight CORS: frena POST cruzados desde otros sitios)."""
+        if not self._authorized():
+            self._unauthorized()
+            return False
+        if self.command == "POST" and "application/json" not in self.headers.get("Content-Type", ""):
+            self._error(415, "se espera application/json")
+            return False
+        return True
+
+    def do_POST(self):
+        if not self._write_guard():
+            return
+        try:
+            if urlparse(self.path).path != "/api/external":
+                self._error(404, "endpoint desconocido")
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > 10_000:
+                self._error(400, "cuerpo inválido")
+                return
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("se espera un objeto JSON")
+            with db.connect() as pg:
+                vid = db.ensure_venue(pg, "bois")
+                new_id = an.external_add(pg, vid, data)
+            self._json({"ok": True, "id": new_id}, 201)
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._error(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self._error(500, f"error interno: {exc.__class__.__name__}")
+
+    def do_DELETE(self):
+        if not self._write_guard():
+            return
+        try:
+            url = urlparse(self.path)
+            if url.path != "/api/external":
+                self._error(404, "endpoint desconocido")
+                return
+            ext_id = int(parse_qs(url.query).get("id", [""])[0])
+            with db.connect() as pg:
+                vid = db.ensure_venue(pg, "bois")
+                found = an.external_remove(pg, vid, ext_id)
+            if not found:
+                self._error(404, "no encontrado")
+                return
+            self._json({"ok": True})
+        except ValueError:
+            self._error(400, "id inválido")
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self._error(500, f"error interno: {exc.__class__.__name__}")
+
     # -------------------------------------------------------------- GET
     def do_GET(self):
         url = urlparse(self.path)
@@ -121,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/dashboard":
                 qs = parse_qs(url.query)
-                today = date.today()
+                today = an.today_ar()
                 d0 = date.fromisoformat(qs["from"][0]) if qs.get("from") else today.replace(day=1)
                 d1 = date.fromisoformat(qs["to"][0]) if qs.get("to") else today
                 if d0 > d1:

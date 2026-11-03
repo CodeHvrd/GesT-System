@@ -317,6 +317,24 @@ with totals as (
 )
 select venue_id, month_key, gastos from pref;
 
+-- ---------------------------------------------------------------- gastos externos
+
+-- Gastos que no pasan por Fudo, cargados desde el portal.
+--   fijo: se repite (mensual/semanal) y se prorratea por día; excepcional: puntual.
+create table if not exists external_expenses (
+    id           bigserial primary key,
+    venue_id     bigint not null references venues(id) on delete cascade,
+    kind         text not null check (kind in ('fijo', 'excepcional')),
+    name         text not null,
+    amount       numeric(12,2) not null check (amount >= 0),
+    expense_date date,
+    frequency    text,
+    start_date   date,
+    end_date     date,
+    created_at   timestamptz not null default now()
+);
+create index if not exists external_expenses_ix on external_expenses (venue_id, kind, expense_date);
+
 -- ---------------------------------------------------------------- operación
 
 create table if not exists sync_runs (

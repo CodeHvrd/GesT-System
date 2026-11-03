@@ -11,10 +11,18 @@ Reglas:
 
 from __future__ import annotations
 
+import calendar
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from app.config import load_config
+
+# Argentina no usa horario de verano: UTC-3 fijo. Render corre en UTC.
+ART = timezone(timedelta(hours=-3))
+
+
+def today_ar() -> date:
+    return datetime.now(ART).date()
 
 MESES = [
     "enero", "febrero", "marzo", "abril", "mayo", "junio",
@@ -156,6 +164,10 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
     exp = _expenses(conn, venue_id, d0, d1)
     prev_exp = _expenses(conn, venue_id, p0, p1)
     top = _top_category(conn, venue_id, d0, d1)
+    ext = _external_totals(conn, venue_id, d0, d1)
+    prev_ext = _external_totals(conn, venue_id, p0, p1)
+    gastos_total = r(exp["total"] + ext["excepcional"] + ext["fijo"])
+    prev_gastos_total = r(prev_exp["total"] + prev_ext["excepcional"] + prev_ext["fijo"])
 
     def pct(a, b):
         return r((a - b) / b * 100, 1) if b else None
@@ -168,7 +180,12 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
             "ventas": cur["ventas"],
             "ventas_menu": cur["ventas_menu"],
             "ventas_delivery": cur["ventas_delivery"],
-            "gastos": exp["total"],
+            "gastos": gastos_total,
+            "gastos_fudo": exp["total"],
+            "gastos_fudo_fuente": exp["fuente"],
+            "gastos_externos": ext["excepcional"],
+            "gastos_fijos": ext["fijo"],
+            "resultado": r(cur["ganancia"] - gastos_total),
             "cmv": cur["cmv"],
             "cmv_pct": cur["cmv_pct"],
             "ganancia": cur["ganancia"],
@@ -181,14 +198,14 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
             "ventas_pct": pct(cur["ventas"], prev["ventas"]),
             "ventas_menu_pct": pct(cur["ventas_menu"], prev["ventas_menu"]),
             "delivery_pct": pct(cur["ventas_delivery"], prev["ventas_delivery"]),
-            "gastos_pct": pct(exp["total"], prev_exp["total"]),
+            "gastos_pct": pct(gastos_total, prev_gastos_total),
             "ganancia_pct": pct(cur["ganancia"], prev["ganancia"]),
             "cmv_pp": r(cur["cmv_pct"] - prev["cmv_pct"], 1),
             "anterior": {
                 "ventas": prev["ventas"],
                 "ventas_menu": prev["ventas_menu"],
                 "ventas_delivery": prev["ventas_delivery"],
-                "gastos": prev_exp["total"],
+                "gastos": prev_gastos_total,
                 "cmv_pct": prev["cmv_pct"],
                 "ganancia": prev["ganancia"],
             },
@@ -196,7 +213,7 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
     }
 
 
-def categories(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
+def categories(conn, venue_id: int, d0: date, d1: date, with_products: bool = False) -> list[dict]:
     p0, p1 = previous_range(d0, d1)
     rows = conn.execute(
         """
@@ -233,6 +250,31 @@ def categories(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
     tgt = targets()
     total = sum(f(x["ventas"]) for x in rows) or 1
 
+    productos: dict[str, list[dict]] = {}
+    if with_products:
+        prod_rows = conn.execute(
+            """
+            SELECT COALESCE(c.name, 'Sin categoría') AS categoria,
+                   COALESCE(p.name, 'Sin producto') AS producto,
+                   SUM(si.quantity) AS cantidad,
+                   SUM(si.line_total) AS ventas
+              FROM sales s
+              JOIN sale_items si ON si.sale_id = s.id
+              LEFT JOIN products p ON p.id = si.product_id
+              LEFT JOIN product_categories c ON c.id = p.category_id
+             WHERE s.venue_id = %s AND s.state = 'CLOSED' AND si.canceled = false
+               AND s.channel <> 'delivery'
+               AND s.business_date BETWEEN %s AND %s
+             GROUP BY 1, 2
+             ORDER BY 3 DESC, 4 DESC
+            """,
+            (venue_id, d0, d1),
+        ).fetchall()
+        for x in prod_rows:
+            lst = productos.setdefault(x["categoria"], [])
+            if len(lst) < 10:
+                lst.append({"producto": x["producto"], "cantidad": r(x["cantidad"], 0), "ventas": r(x["ventas"])})
+
     out = []
     for x in rows:
         v, c = f(x["ventas"]), f(x["cmv"])
@@ -255,6 +297,7 @@ def categories(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
                 ),
                 "anterior": r(pv),
                 "delta_pct": r((v - pv) / pv * 100, 1) if pv else None,
+                "productos": productos.get(x["categoria"], []),
             }
         )
     return out
@@ -550,7 +593,8 @@ def meta(conn, venue_id: int) -> dict:
         (venue_id, venue_id),
     ).fetchall()
     last = conn.execute(
-        "SELECT kind, status, finished_at FROM sync_runs WHERE venue_id = %s ORDER BY id DESC LIMIT 1",
+        "SELECT kind, status, finished_at FROM sync_runs WHERE venue_id = %s AND finished_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
         (venue_id,),
     ).fetchone()
     return {
@@ -560,16 +604,259 @@ def meta(conn, venue_id: int) -> dict:
             "tipo": last["kind"], "estado": last["status"],
             "cuando": last["finished_at"].isoformat() if last and last["finished_at"] else None,
         } if last else None,
-        "hoy": date.today().isoformat(),
+        "hoy": today_ar().isoformat(),
     }
 
 
 def dashboard(conn, venue_id: int, d0: date, d1: date) -> dict:
+    ensure_external_schema(conn)
     return {
         "meta": meta(conn, venue_id),
         "summary": summary(conn, venue_id, d0, d1),
-        "categories": categories(conn, venue_id, d0, d1),
+        "progress": progress(conn, venue_id, d0, d1),
+        "categories": categories(conn, venue_id, d0, d1, with_products=True),
         "daily": daily(conn, venue_id, d0, d1),
         "expenses": expenses_detail(conn, venue_id, d0, d1),
+        "cross": expenses_cross(conn, venue_id),
+        "external": external_list(conn, venue_id, d0, d1),
         "review": review(conn, venue_id, d0, d1),
     }
+
+
+# ------------------------------------------------------------------ gastos externos
+# Gastos que no pasan por Fudo y se cargan en GesT:
+#   fijo        -> se repite (alquiler, sueldos...); se prorratea por día en cada período
+#   excepcional -> un gasto puntual en una fecha
+
+EXTERNAL_DDL = """
+CREATE TABLE IF NOT EXISTS external_expenses (
+    id           bigserial PRIMARY KEY,
+    venue_id     bigint NOT NULL REFERENCES venues(id) ON DELETE CASCADE,
+    kind         text NOT NULL CHECK (kind IN ('fijo', 'excepcional')),
+    name         text NOT NULL,
+    amount       numeric(12,2) NOT NULL CHECK (amount >= 0),
+    expense_date date,
+    frequency    text,
+    start_date   date,
+    end_date     date,
+    created_at   timestamptz NOT NULL DEFAULT now()
+)
+"""
+EXTERNAL_INDEX = (
+    "CREATE INDEX IF NOT EXISTS external_expenses_ix ON external_expenses (venue_id, kind, expense_date)"
+)
+_external_ready = False
+
+
+def ensure_external_schema(conn) -> None:
+    """Crea la tabla si falta (el servidor no corre el esquema completo)."""
+    global _external_ready
+    if _external_ready:
+        return
+    conn.execute(EXTERNAL_DDL)
+    conn.execute(EXTERNAL_INDEX)
+    conn.commit()
+    _external_ready = True
+
+
+def _daily_rate(row: dict, day: date) -> float:
+    amount = f(row["amount"])
+    if row["frequency"] == "semanal":
+        return amount / 7
+    return amount / calendar.monthrange(day.year, day.month)[1]
+
+
+def _external_totals(conn, venue_id: int, d0: date, d1: date) -> dict:
+    ensure_external_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT kind, amount, expense_date, frequency, start_date, end_date
+          FROM external_expenses
+         WHERE venue_id = %s
+           AND ((kind = 'excepcional' AND expense_date BETWEEN %s AND %s)
+             OR (kind = 'fijo'))
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    exc = 0.0
+    fijo = 0.0
+    for row in rows:
+        if row["kind"] == "excepcional":
+            exc += f(row["amount"])
+            continue
+        a = max(d0, row["start_date"] or d0)
+        b = min(d1, row["end_date"] or d1)
+        day = a
+        while day <= b:
+            fijo += _daily_rate(row, day)
+            day += timedelta(days=1)
+    return {"excepcional": r(exc), "fijo": r(fijo)}
+
+
+def external_list(conn, venue_id: int, d0: date, d1: date) -> dict:
+    ensure_external_schema(conn)
+    today = today_ar()
+    fijos = conn.execute(
+        """
+        SELECT id, name, amount, frequency, start_date, end_date
+          FROM external_expenses
+         WHERE venue_id = %s AND kind = 'fijo' AND (end_date IS NULL OR end_date >= %s)
+         ORDER BY amount DESC
+        """,
+        (venue_id, today),
+    ).fetchall()
+    exc = conn.execute(
+        """
+        SELECT id, name, amount, expense_date
+          FROM external_expenses
+         WHERE venue_id = %s AND kind = 'excepcional' AND expense_date BETWEEN %s AND %s
+         ORDER BY expense_date DESC, id DESC
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    return {
+        "fijos": [
+            {"id": x["id"], "nombre": x["name"], "monto": r(x["amount"]), "frecuencia": x["frequency"] or "mensual",
+             "desde": x["start_date"].isoformat() if x["start_date"] else None}
+            for x in fijos
+        ],
+        "excepcionales": [
+            {"id": x["id"], "nombre": x["name"], "monto": r(x["amount"]), "fecha": x["expense_date"].isoformat()}
+            for x in exc
+        ],
+    }
+
+
+def external_add(conn, venue_id: int, data: dict) -> int:
+    ensure_external_schema(conn)
+    kind = str(data.get("tipo") or "").strip()
+    if kind not in ("fijo", "excepcional"):
+        raise ValueError("tipo debe ser fijo o excepcional")
+    name = str(data.get("nombre") or "").strip()
+    if not name or len(name) > 80:
+        raise ValueError("el nombre es obligatorio (máx. 80 caracteres)")
+    try:
+        amount = float(str(data.get("monto")).replace(",", "."))
+    except ValueError:
+        raise ValueError("monto inválido") from None
+    if not (0 < amount < 1e9):
+        raise ValueError("el monto debe ser mayor a 0")
+
+    def d(key):
+        v = str(data.get(key) or "").strip()
+        return date.fromisoformat(v) if v else None
+
+    if kind == "excepcional":
+        row = conn.execute(
+            "INSERT INTO external_expenses (venue_id, kind, name, amount, expense_date) "
+            "VALUES (%s, 'excepcional', %s, %s, %s) RETURNING id",
+            (venue_id, name, amount, d("fecha") or today_ar()),
+        ).fetchone()
+    else:
+        freq = str(data.get("frecuencia") or "mensual")
+        if freq not in ("mensual", "semanal"):
+            raise ValueError("frecuencia debe ser mensual o semanal")
+        # por defecto cuenta desde el 1 del mes actual, así no altera meses cerrados
+        start = d("fecha") or today_ar().replace(day=1)
+        row = conn.execute(
+            "INSERT INTO external_expenses (venue_id, kind, name, amount, frequency, start_date) "
+            "VALUES (%s, 'fijo', %s, %s, %s, %s) RETURNING id",
+            (venue_id, name, amount, freq, start),
+        ).fetchone()
+    return row["id"]
+
+
+def external_remove(conn, venue_id: int, ext_id: int) -> bool:
+    """Excepcional: se borra. Fijo: se da de baja (queda en el historial pasado)."""
+    ensure_external_schema(conn)
+    row = conn.execute(
+        "SELECT kind, start_date FROM external_expenses WHERE id = %s AND venue_id = %s", (ext_id, venue_id)
+    ).fetchone()
+    if not row:
+        return False
+    yesterday = today_ar() - timedelta(days=1)
+    if row["kind"] == "fijo" and row["start_date"] and row["start_date"] <= yesterday:
+        conn.execute("UPDATE external_expenses SET end_date = %s WHERE id = %s", (yesterday, ext_id))
+    else:
+        conn.execute("DELETE FROM external_expenses WHERE id = %s", (ext_id,))
+    return True
+
+
+# ------------------------------------------------------------------ progreso y cruce
+
+
+def progress(conn, venue_id: int, d0: date, d1: date) -> dict | None:
+    """Avance del período en curso y ritmo de ventas contra el período anterior."""
+    today = today_ar()
+    if not (d0 <= today <= d1):
+        return None
+    total_days = (d1 - d0).days + 1
+    elapsed = (today - d0).days + 1
+    p0, p1 = previous_range(d0, d1)
+    same_end = min(p1, p0 + timedelta(days=elapsed - 1))
+    cur = _totals(conn, venue_id, d0, today)
+    prev_same = _totals(conn, venue_id, p0, same_end)
+    prev_full = _totals(conn, venue_id, p0, p1)
+
+    ritmo = r((cur["ventas"] - prev_same["ventas"]) / prev_same["ventas"] * 100, 1) if prev_same["ventas"] else None
+    if ritmo is None:
+        nivel, label = "neutral", "Sin período anterior para comparar"
+    elif ritmo >= 5:
+        nivel, label = "good", "Por encima del ritmo anterior"
+    elif ritmo >= -5:
+        nivel, label = "good", "En línea con el período anterior"
+    elif ritmo >= -15:
+        nivel, label = "warn", "Algo por debajo del período anterior"
+    else:
+        nivel, label = "bad", "Por debajo del período anterior"
+    return {
+        "dias_total": total_days,
+        "dias_transcurridos": elapsed,
+        "pct_tiempo": r(elapsed / total_days * 100, 0),
+        "ventas_acumuladas": cur["ventas"],
+        "ventas_anterior_mismos_dias": prev_same["ventas"],
+        "ventas_anterior_total": prev_full["ventas"],
+        "pct_vs_anterior_total": r(cur["ventas"] / prev_full["ventas"] * 100, 0) if prev_full["ventas"] else None,
+        "proyeccion": r(cur["ventas"] / elapsed * total_days, 0),
+        "ritmo_pct": ritmo,
+        "nivel": nivel,
+        "estado": label,
+        "anterior": {"desde": p0.isoformat(), "hasta": p1.isoformat(), "etiqueta": label_period(p0, p1)},
+    }
+
+
+def expenses_cross(conn, venue_id: int, months: int = 6) -> list[dict]:
+    """Por mes: gastos de Fudo vs. los de la planilla, más los externos cargados en GesT."""
+    today = today_ar()
+    first = today.replace(day=1)
+    for _ in range(months - 1):
+        first = (first - timedelta(days=1)).replace(day=1)
+    rows = conn.execute(
+        """
+        SELECT to_char(expense_date, 'YYYY-MM') AS m, source, SUM(amount) AS t
+          FROM expenses
+         WHERE venue_id = %s AND source IN ('fudo', 'sheet') AND expense_date >= %s
+         GROUP BY 1, 2
+        """,
+        (venue_id, first),
+    ).fetchall()
+    by = {(x["m"], x["source"]): f(x["t"]) for x in rows}
+    out = []
+    cursor = today.replace(day=1)
+    for _ in range(months):
+        key = cursor.strftime("%Y-%m")
+        end = min(today, cursor.replace(day=calendar.monthrange(cursor.year, cursor.month)[1]))
+        ext = _external_totals(conn, venue_id, cursor, end)
+        fudo, sheet = by.get((key, "fudo"), 0.0), by.get((key, "sheet"), 0.0)
+        out.append(
+            {
+                "mes": key,
+                "etiqueta": f"{MESES[cursor.month - 1].capitalize()} {cursor.year}",
+                "fudo": r(fudo),
+                "planilla": r(sheet),
+                "diferencia": r(sheet - fudo) if fudo and sheet else None,
+                "externos": r(ext["excepcional"] + ext["fijo"]),
+            }
+        )
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
+    return out

@@ -15,13 +15,13 @@
       <div class="mark">G</div>
       <div>
         <h1 id="brand-name">GesT</h1>
-        <p>Resumen de gestión</p>
+        <p id="freshness" class="fresh">Resumen de gestión</p>
       </div>
     </div>
     <div class="period">
       <div class="presets">
-        <button type="button" class="chip" data-preset="week">Semana actual</button>
-        <button type="button" class="chip active" data-preset="month">Mes actual</button>
+        <button type="button" class="chip active" data-preset="week">Semana actual</button>
+        <button type="button" class="chip" data-preset="month">Mes actual</button>
         <button type="button" class="chip" data-preset="prev-month">Mes pasado</button>
       </div>
       <div class="dates">
@@ -35,9 +35,88 @@
   <main id="main">
     <div id="loading" class="loading"><span class="spinner"></span> Cargando datos…</div>
     <div id="content" hidden>
-      <section id="kpis" class="kpis"></section>
-      <p id="compare" class="compare"></p>
 
+      <!-- 1 · progreso y métricas del período -->
+      <section class="card status-card">
+        <div class="status-top">
+          <div>
+            <h2 id="period-title">Semana actual</h2>
+            <span id="period-label" class="muted"></span>
+          </div>
+          <span id="status-pill" class="pill"></span>
+        </div>
+        <div id="progress" class="progress"></div>
+        <section id="kpis" class="kpis"></section>
+        <p id="result" class="result"></p>
+      </section>
+
+      <!-- 2 · categorías con sus artículos -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Lo que más se vende</h2>
+          <span id="cats-note" class="muted"></span>
+        </div>
+        <div id="cats" class="cats"></div>
+      </section>
+
+      <!-- 3 · gastos: Fudo vs planilla + externos -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Gastos: Fudo y planilla</h2>
+          <span class="muted">por mes</span>
+        </div>
+        <div class="table-wrap">
+          <table id="cross">
+            <thead>
+              <tr><th>Mes</th><th class="r">Fudo</th><th class="r">Planilla</th><th class="r">Diferencia</th><th class="r">Externos</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <details class="more">
+          <summary>Gastos de Fudo por categoría en el período</summary>
+          <div id="expenses"></div>
+        </details>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Gastos externos</h2>
+          <span class="muted">no pasan por Fudo</span>
+        </div>
+        <form id="ext-form" class="ext-form" autocomplete="off">
+          <label class="f-kind">Tipo
+            <select id="ext-kind" name="tipo">
+              <option value="excepcional">Excepcional (una vez)</option>
+              <option value="fijo">Fijo (se repite)</option>
+            </select>
+          </label>
+          <label class="f-name">Concepto <input id="ext-name" name="nombre" maxlength="80" placeholder="Ej: Alquiler, reparación" required></label>
+          <label class="f-amount">Monto <input id="ext-amount" name="monto" inputmode="decimal" placeholder="0" required></label>
+          <label class="f-freq" id="ext-freq-box" hidden>Se repite
+            <select id="ext-freq" name="frecuencia">
+              <option value="mensual">Cada mes</option>
+              <option value="semanal">Cada semana</option>
+            </select>
+          </label>
+          <label class="f-date"><span id="ext-date-label">Fecha</span> <input type="date" id="ext-date" name="fecha"></label>
+          <button type="submit" class="btn btn-solid">Agregar</button>
+        </form>
+        <p id="ext-msg" class="form-msg" role="status"></p>
+        <div class="ext-cols">
+          <div>
+            <h3>Fijos activos</h3>
+            <div id="ext-fijos"></div>
+          </div>
+          <div>
+            <h3>Excepcionales del período</h3>
+            <div id="ext-exc"></div>
+          </div>
+        </div>
+        <p class="muted note">Los fijos se prorratean por día: en una semana cuentan 7/30 de un gasto mensual.</p>
+      </section>
+
+      <!-- 4 · detalle -->
       <section class="card">
         <div class="card-head">
           <h2>Ventas por día</h2>
@@ -51,31 +130,6 @@
           <span><i class="dot delivery"></i> Delivery</span>
         </div>
       </section>
-
-      <div class="cols">
-        <section class="card">
-          <div class="card-head">
-            <h2>Categorías</h2>
-            <span id="cats-note" class="muted"></span>
-          </div>
-          <div class="table-wrap">
-            <table id="cats">
-              <thead>
-                <tr><th>Categoría</th><th class="r">Ventas</th><th class="r">CMV</th><th class="r">Part.</th><th class="r">vs ant.</th></tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <h2>Gastos</h2>
-            <span id="exp-note" class="muted"></span>
-          </div>
-          <div id="expenses"></div>
-        </section>
-      </div>
 
       <section class="review">
         <div class="card-head">

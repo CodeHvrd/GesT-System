@@ -16,6 +16,10 @@
       <div>
         <h1 id="brand-name">GesT</h1>
         <p id="freshness" class="fresh">Resumen de gestión</p>
+        <div class="ver-row">
+          <span id="ver-top" class="ver-pill">v—</span>
+          <button type="button" id="btn-update-top" class="ver-btn" title="Sincronizar con el último commit de GitHub">↻ Forzar última versión</button>
+        </div>
       </div>
     </div>
     <div class="period">
@@ -152,7 +156,14 @@
         </div>
       </section>
 
-      <footer id="foot" class="foot"></footer>
+      <footer class="foot">
+        <div id="foot"></div>
+        <div class="version-bar">
+          <span id="ver-badge" class="ver-badge">Versión —</span>
+          <button type="button" id="btn-update" class="btn-link">Forzar última versión de Git</button>
+          <span id="ver-msg" class="ver-msg" role="status"></span>
+        </div>
+      </footer>
     </div>
   </main>
 </div>

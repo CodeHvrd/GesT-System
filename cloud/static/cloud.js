@@ -95,6 +95,7 @@ function render(d) {
     document.title = `${d.meta.local} · Resumen de gestión`;
   }
   renderFreshness(d.meta);
+  renderVersion(d.meta && d.meta.version);
   renderProgress(s, d.progress);
   renderKpis(s);
   renderCats(d.categories);
@@ -400,6 +401,78 @@ function renderReview(review) {
   });
 }
 
+/* ------------------------------------------------------------------ versión y actualización */
+function renderVersion(ver) {
+  const v = ver || '—';
+  const top = $('#ver-top');
+  const foot = $('#ver-badge');
+  if (top) top.textContent = `v${v}`;
+  if (foot) foot.textContent = `Versión en uso: ${v}`;
+}
+
+async function checkRemoteVersion() {
+  try {
+    const res = await fetch('/api/version?remote=1', { headers: { Accept: 'application/json' } });
+    const json = await res.json();
+    if (!json.ok || !json.data) return;
+    const d = json.data;
+    renderVersion(d.version);
+    const top = $('#ver-top');
+    const foot = $('#ver-badge');
+    if (d.remoto && d.remoto.corta) {
+      if (d.al_dia) {
+        if (top) {
+          top.textContent = `v${d.version} · al día`;
+          top.className = 'ver-pill ok';
+          top.title = `Último commit en GitHub (${d.remoto.corta}): ${d.remoto.mensaje || ''}`;
+        }
+        if (foot) foot.textContent = `Versión en uso: ${d.version} (al día con GitHub · ${d.remoto.mensaje || ''})`;
+      } else {
+        if (top) {
+          top.textContent = `v${d.version} → hay nueva (${d.remoto.corta})`;
+          top.className = 'ver-pill warn';
+          top.title = `Disponible en GitHub: ${d.remoto.mensaje || ''}`;
+        }
+        if (foot) foot.textContent = `Versión en uso: ${d.version} · disponible en GitHub: ${d.remoto.corta} (${d.remoto.mensaje || ''})`;
+      }
+    }
+  } catch (_e) {
+    // silencioso
+  }
+}
+
+async function forceUpdate() {
+  const btns = [$('#btn-update'), $('#btn-update-top')].filter(Boolean);
+  const msg = $('#ver-msg');
+  const top = $('#ver-top');
+  btns.forEach((b) => { b.disabled = true; b.textContent = 'Sincronizando con Git…'; });
+  if (msg) msg.textContent = 'Consultando último commit en GitHub…';
+  try {
+    const res = await fetch('/api/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: '{}',
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'No se pudo actualizar');
+    const u = json.data;
+    const label = `Actualizado a ${u.actual} (${u.mensaje || 'última versión'}) · recargando…`;
+    if (msg) msg.textContent = label;
+    if (top) {
+      top.textContent = `v${u.actual} · actualizado`;
+      top.className = 'ver-pill ok';
+    }
+    setTimeout(() => {
+      window.location.replace('/?v=' + encodeURIComponent(u.actual) + '&t=' + Date.now());
+    }, 600);
+  } catch (err) {
+    if (msg) msg.textContent = `Error: ${err.message}`;
+    btns.forEach((b) => { b.disabled = false; });
+    if ($('#btn-update')) $('#btn-update').textContent = 'Forzar última versión de Git';
+    if ($('#btn-update-top')) $('#btn-update-top').textContent = '↻ Forzar última versión';
+  }
+}
+
 /* ------------------------------------------------------------------ eventos */
 document.querySelectorAll('[data-preset]').forEach((b) => {
   b.addEventListener('click', () => applyPreset(b.dataset.preset));
@@ -416,6 +489,8 @@ $('#apply').addEventListener('click', () => {
 });
 $('#ext-kind').addEventListener('change', syncFormKind);
 $('#ext-form').addEventListener('submit', addExternal);
+if ($('#btn-update')) $('#btn-update').addEventListener('click', forceUpdate);
+if ($('#btn-update-top')) $('#btn-update-top').addEventListener('click', forceUpdate);
 document.addEventListener('click', (ev) => {
   const btn = ev.target.closest('[data-del]');
   if (btn) removeExternal(btn.dataset.del, btn.dataset.kind);
@@ -426,3 +501,4 @@ setInterval(() => { if (!document.hidden && state.from) load(true); }, 300000);
 
 syncFormKind();
 applyPreset('week');
+checkRemoteVersion();

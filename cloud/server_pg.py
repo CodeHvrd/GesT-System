@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import base64
 import hmac
+import importlib
 import json
 import os
+import subprocess
 import sys
+import time
 import traceback
-from datetime import date
+import urllib.request
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -29,6 +33,118 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8788"))
 PORTAL_USER = os.environ.get("PORTAL_USER", "bois")
 PORTAL_PASS = os.environ.get("PORTAL_PASS", "")
+
+# ------------------------------------------------------------------ versión
+# Render expone RENDER_GIT_COMMIT con el commit desplegado. En local se lee de git.
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "CodeHvrd/GesT-System")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+STARTED_AT = datetime.now(timezone.utc)
+_last_deploy_trigger = 0.0
+
+
+def _detect_version() -> str:
+    full = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "").strip()
+    if full:
+        return full
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=STATIC.parent.parent, capture_output=True, text=True, timeout=3
+        )
+        return out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+VERSION_FULL = _detect_version()
+VERSION = VERSION_FULL[:7] or "desconocida"
+
+HotReloadFiles = (
+    "cloud/static/index.html",
+    "cloud/static/cloud.css",
+    "cloud/static/cloud.js",
+    "cloud/analytics_pg.py",
+)
+
+
+def _github_latest() -> dict:
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/commits/{GITHUB_BRANCH}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "gest-system"},
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.load(resp)
+    sha = data.get("sha") or ""
+    commit = data.get("commit") or {}
+    msg = (commit.get("message") or "").splitlines()[0]
+    fecha = (commit.get("committer") or {}).get("date")
+    return {"sha": sha, "corta": sha[:7], "mensaje": msg, "fecha": fecha}
+
+
+def version_info(check_remote: bool = False) -> dict:
+    info = {
+        "version": VERSION,
+        "commit": VERSION_FULL,
+        "iniciado": STARTED_AT.isoformat(),
+        "repo": GITHUB_REPO,
+        "rama": GITHUB_BRANCH,
+    }
+    if check_remote:
+        try:
+            rem = _github_latest()
+            info["remoto"] = rem
+            info["al_dia"] = bool(VERSION_FULL) and rem["sha"] == VERSION_FULL
+        except Exception:  # noqa: BLE001
+            info["remoto"] = None
+            info["al_dia"] = None
+    return info
+
+
+def check_update() -> dict:
+    """Sincroniza con el último commit de GitHub en caliente y opcionalmente dispara Render deploy hook."""
+    global VERSION_FULL, VERSION, _last_deploy_trigger
+    rem = _github_latest()
+    latest = rem["sha"]
+    was_up_to_date = bool(VERSION_FULL) and latest == VERSION_FULL
+    updated_files: list[str] = []
+
+    root = STATIC.parent.parent
+    for rel in HotReloadFiles:
+        raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{latest}/{rel}"
+        req = urllib.request.Request(raw_url, headers={"User-Agent": "gest-system"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content = resp.read()
+        dest = (root / rel).resolve()
+        if root in dest.parents and content:
+            dest.write_bytes(content)
+            updated_files.append(rel)
+
+    importlib.reload(an)
+    prev = VERSION
+    VERSION_FULL = latest
+    VERSION = latest[:7] or "desconocida"
+
+    hook = os.environ.get("RENDER_DEPLOY_HOOK", "").strip()
+    deploy_state = None
+    if not was_up_to_date and hook and (time.time() - _last_deploy_trigger >= 90):
+        try:
+            urllib.request.urlopen(urllib.request.Request(hook, method="POST"), timeout=10).read()
+            _last_deploy_trigger = time.time()
+            deploy_state = "disparado"
+        except Exception:  # noqa: BLE001
+            deploy_state = "error_hook"
+
+    return {
+        "anterior": prev,
+        "actual": VERSION,
+        "ultima": rem["corta"],
+        "mensaje": rem["mensaje"],
+        "fecha": rem["fecha"],
+        "al_dia": True,
+        "ya_estaba_al_dia": was_up_to_date,
+        "archivos": len(updated_files),
+        "deploy": deploy_state,
+    }
+
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -97,8 +213,15 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, "no encontrado")
             return
         ctype = MIME.get(target.suffix.lower(), "application/octet-stream")
-        cache = "no-store" if target.suffix == ".html" else "public, max-age=120"
-        self._send(200, target.read_bytes(), ctype, cache)
+        body = target.read_bytes()
+        if target.name == "index.html":
+            body = (
+                body.decode("utf-8")
+                .replace('href="/cloud.css"', f'href="/cloud.css?v={VERSION}"')
+                .replace('src="/cloud.js"', f'src="/cloud.js?v={VERSION}"')
+                .encode("utf-8")
+            )
+        self._send(200, body, ctype, "no-store")
 
     # -------------------------------------------------------------- escritura
     def _write_guard(self) -> bool:
@@ -115,6 +238,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._write_guard():
             return
         try:
+            if urlparse(self.path).path == "/api/update":
+                try:
+                    self._json({"ok": True, "data": check_update()})
+                except Exception:  # noqa: BLE001
+                    self._error(502, "no se pudo consultar GitHub o actualizar archivos")
+                return
             if urlparse(self.path).path != "/api/external":
                 self._error(404, "endpoint desconocido")
                 return
@@ -166,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/healthz":
-                self._json({"ok": True})
+                self._json({"ok": True, "version": VERSION})
                 return
             if path == "/readyz":
                 try:
@@ -186,7 +315,12 @@ class Handler(BaseHTTPRequestHandler):
                 with db.connect() as pg:
                     vid = db.ensure_venue(pg, "bois")
                     data = an.dashboard(pg, vid, d0, d1)
+                data["meta"]["version"] = VERSION
                 self._json({"ok": True, "data": data})
+                return
+            if path == "/api/version":
+                qs = parse_qs(url.query)
+                self._json({"ok": True, "data": version_info(check_remote=bool(qs.get("remote")))})
                 return
             if path == "/api/meta":
                 with db.connect() as pg:

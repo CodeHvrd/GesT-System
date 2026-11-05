@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +30,10 @@ from app.fudo import FudoClient, FudoError  # noqa: E402
 PAGE_SIZE = 500
 MAX_PAGES = 60
 TZ_OFFSET = timedelta(hours=-3)
+
+# Cache en memoria del catálogo de productos: (base_url, api_key) -> (epoch, catalog_dict)
+_CATALOG_CACHE: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
+CATALOG_TTL = 600.0
 
 
 # ------------------------------------------------------------------ helpers
@@ -132,11 +137,11 @@ def client_from_env(pg=None, venue_id: int | None = None) -> FudoClient:
 # ------------------------------------------------------------------ sync runs
 
 
-def start_run(pg, venue_id: int, kind: str, d0: date, d1: date) -> int:
+def start_run(pg, venue_id: int, kind: str, d0: date | None, d1: date | None) -> int:
     row = pg.execute(
         """
-        INSERT INTO sync_runs (venue_id, kind, range_start, range_end, status)
-        VALUES (%s, %s, %s, %s, 'running') RETURNING id
+        INSERT INTO sync_runs (venue_id, kind, range_start, range_end, started_at, status)
+        VALUES (%s, %s, %s, %s, clock_timestamp(), 'running') RETURNING id
         """,
         (venue_id, kind, d0, d1),
     ).fetchone()
@@ -147,7 +152,7 @@ def finish_run(pg, run_id: int, status: str, read: int, written: int, message: s
     pg.execute(
         """
         UPDATE sync_runs
-           SET status = %s, rows_read = %s, rows_written = %s, message = %s, finished_at = now()
+           SET status = %s, rows_read = %s, rows_written = %s, message = %s, finished_at = clock_timestamp()
          WHERE id = %s
         """,
         (status, read, written, message[:1000], run_id),
@@ -157,12 +162,19 @@ def finish_run(pg, run_id: int, status: str, read: int, written: int, message: s
 # ------------------------------------------------------------------ ventas
 
 
-def fetch_product_catalog(client: FudoClient) -> dict[str, dict]:
+def fetch_product_catalog(client: FudoClient, use_cache: bool = True) -> dict[str, dict]:
     """Catálogo de productos con costo: directo o calculado desde la receta.
 
     Fudo no devuelve el costo en los ítems de venta. El costo por producto sale de
     `cost` (si está cargado) o de la receta: proporción × costo del insumo × merma.
     """
+    cache_key = (client.base_url, client.api_key)
+    now = time.time()
+    if use_cache:
+        cached = _CATALOG_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < CATALOG_TTL:
+            return cached[1]
+
     out: dict[str, dict] = {}
     page = 1
     while page <= 10:
@@ -210,6 +222,7 @@ def fetch_product_catalog(client: FudoClient) -> dict[str, dict]:
         if len(rows) < 500:
             break
         page += 1
+    _CATALOG_CACHE[cache_key] = (now, out)
     return out
 
 
@@ -229,9 +242,28 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
         "fields[order]": "origin",
     }
     catalog = fetch_product_catalog(client)
+    overrides: dict[str, float] = {}
+    try:
+        for r in pg.execute(
+            "SELECT lower(p.name) AS name, o.cost FROM product_cost_overrides o "
+            "JOIN products p ON p.id = o.product_id WHERE o.venue_id = %s",
+            (venue_id,),
+        ).fetchall():
+            if r["cost"] is not None:
+                overrides[r["name"]] = float(r["cost"])
+    except Exception:  # noqa: BLE001
+        pg.rollback()
+        run_id = start_run(pg, venue_id, "fudo_sales", d0, d1)
+
     read = written = 0
     page = 1
     try:
+        categories_set: set[str] = set()
+        products_map: dict[str, dict] = {}
+        sales_records: list[dict] = []
+        items_by_ext: dict[str, list[dict]] = {}
+        synced_dates: set[date] = set()
+
         while page <= MAX_PAGES:
             q = dict(params)
             q["page[number]"] = page
@@ -273,86 +305,216 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
                     pid = rel_id(item, "product")
                     prod = inc.get(("Product", str(pid))) if pid else None
                     entry = catalog.get(str(pid)) if pid else None
-                    pname = (entry or {}).get("name") or ((prod or {}).get("attributes") or {}).get("name") or "Sin producto"
+                    pname = (
+                        (entry or {}).get("name")
+                        or ((prod or {}).get("attributes") or {}).get("name")
+                        or "Sin producto"
+                    ).strip() or "Sin producto"
                     cid = rel_id(prod, "productCategory") if prod else None
                     cat = inc.get(("ProductCategory", str(cid))) if cid else None
-                    cname = ((cat or {}).get("attributes") or {}).get("name") or "Sin categoría"
-                    unit_cost = float(ia.get("cost") or 0) or float((entry or {}).get("cost") or 0)
+                    cname = (((cat or {}).get("attributes") or {}).get("name") or "Sin categoría").strip() or "Sin categoría"
+
+                    raw_item_cost = ia.get("cost")
+                    cat_cost = (entry or {}).get("cost")
+                    ovr_cost = overrides.get(pname.lower())
+                    if raw_item_cost is not None and float(raw_item_cost) > 0:
+                        cost_val = float(raw_item_cost)
+                        cost_is_unit = False
+                    else:
+                        cost_val = float(cat_cost if cat_cost is not None else (ovr_cost or 0))
+                        cost_is_unit = True
+
+                    categories_set.add(cname)
+                    p_existing = products_map.get(pname)
+                    p_cost = (entry or {}).get("cost")
+                    p_price = (entry or {}).get("price")
+                    if not p_existing:
+                        products_map[pname] = {
+                            "name": pname,
+                            "category": cname,
+                            "cost": p_cost,
+                            "price": p_price,
+                        }
+                    else:
+                        if p_cost is not None:
+                            p_existing["cost"] = p_cost
+                        if p_price is not None:
+                            p_existing["price"] = p_price
+
                     parsed.append(
                         {
                             "qty": qty,
                             "price": price,
-                            "cost": unit_cost,
+                            "cost": cost_val,
+                            "cost_is_unit": cost_is_unit,
                             "product": pname,
                             "category": cname,
-                            "catalog_cost": (entry or {}).get("cost"),
-                            "catalog_price": (entry or {}).get("price"),
                         }
                     )
                 mode = _mode(parsed, total)
-                sale_row = pg.execute(
-                    """
-                    INSERT INTO sales (venue_id, source, external_id, closed_at, business_date,
-                                       sale_type, state, total, channel, channel_detail, payload)
-                    VALUES (%s, 'fudo', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (venue_id, source, external_id) DO UPDATE
-                      SET closed_at = EXCLUDED.closed_at,
-                          business_date = EXCLUDED.business_date,
-                          sale_type = EXCLUDED.sale_type,
-                          state = EXCLUDED.state,
-                          total = EXCLUDED.total,
-                          channel = EXCLUDED.channel,
-                          channel_detail = EXCLUDED.channel_detail,
-                          payload = EXCLUDED.payload,
-                          fetched_at = now()
-                    RETURNING id
-                    """,
-                    (
-                        venue_id,
-                        str(sale.get("id")),
-                        attrs.get("closedAt"),
-                        bdate,
-                        attrs.get("saleType"),
-                        state,
-                        total,
-                        channel,
-                        channel_detail,
-                        Jsonb(sale),
-                    ),
-                ).fetchone()
-                sale_id = sale_row["id"]
-                pg.execute("DELETE FROM sale_items WHERE sale_id = %s", (sale_id,))
+                ext_id = str(sale.get("id"))
+                synced_dates.add(bdate)
+                sales_records.append(
+                    {
+                        "external_id": ext_id,
+                        "closed_at": attrs.get("closedAt"),
+                        "business_date": bdate.isoformat(),
+                        "sale_type": attrs.get("saleType"),
+                        "state": state,
+                        "total": total,
+                        "channel": channel,
+                        "channel_detail": channel_detail,
+                        "payload": sale,
+                    }
+                )
+                sale_items_list = []
                 for it in parsed:
-                    cat_id = db.upsert_category(pg, venue_id, it["category"])
-                    prod_id = db.upsert_product(
-                        pg,
-                        venue_id,
-                        it["product"],
-                        cat_id,
-                        cost=it.get("catalog_cost"),
-                        price=it.get("catalog_price"),
-                    )
+                    qty = it["qty"]
                     if mode == "unidad":
-                        line_total = it["price"] * it["qty"]
-                        line_cost = it["cost"] * it["qty"]
-                        unit_price, unit_cost = it["price"], it["cost"]
+                        line_total = round(it["price"] * qty, 2)
+                        unit_price = it["price"]
                     else:
-                        line_total = it["price"]
-                        line_cost = it["cost"]
-                        unit_price = (it["price"] / it["qty"]) if it["qty"] else None
-                        unit_cost = (it["cost"] / it["qty"]) if it["qty"] else None
-                    pg.execute(
-                        """
-                        INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, line_total,
-                                                unit_cost, line_cost, canceled)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-                        """,
-                        (sale_id, prod_id, it["qty"], unit_price, line_total, unit_cost, line_cost),
+                        line_total = round(it["price"], 2)
+                        unit_price = round(it["price"] / qty, 4) if qty else None
+
+                    if it["cost_is_unit"] or mode == "unidad":
+                        unit_cost = round(it["cost"], 4)
+                        line_cost = round(it["cost"] * qty, 2)
+                    else:
+                        line_cost = round(it["cost"], 2)
+                        unit_cost = round(it["cost"] / qty, 4) if qty else None
+
+                    sale_items_list.append(
+                        {
+                            "product": it["product"],
+                            "quantity": qty,
+                            "unit_price": unit_price,
+                            "line_total": line_total,
+                            "unit_cost": unit_cost,
+                            "line_cost": line_cost,
+                        }
                     )
+                items_by_ext[ext_id] = sale_items_list
                 written += 1
+
             if len(sales) < PAGE_SIZE:
                 break
             page += 1
+
+        if categories_set:
+            cat_rows = pg.execute(
+                """
+                INSERT INTO product_categories (venue_id, name)
+                SELECT %s, x.name
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(name text)
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING id, name
+                """,
+                (venue_id, Jsonb([{"name": n} for n in categories_set])),
+            ).fetchall()
+            cat_id_map = {r["name"]: r["id"] for r in cat_rows}
+        else:
+            cat_id_map = {}
+
+        if products_map:
+            prod_payload = [
+                {
+                    "name": p["name"],
+                    "category_id": cat_id_map.get(p["category"]),
+                    "cost": p["cost"],
+                    "price": p["price"],
+                }
+                for p in products_map.values()
+            ]
+            prod_rows = pg.execute(
+                """
+                INSERT INTO products (venue_id, name, category_id, cost, price)
+                SELECT %s, x.name, x.category_id, x.cost, x.price
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(
+                       name text, category_id bigint, cost numeric, price numeric
+                  )
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET category_id = COALESCE(EXCLUDED.category_id, products.category_id),
+                      cost = COALESCE(EXCLUDED.cost, products.cost),
+                      price = COALESCE(EXCLUDED.price, products.price),
+                      updated_at = now()
+                RETURNING id, name
+                """,
+                (venue_id, Jsonb(prod_payload)),
+            ).fetchall()
+            prod_id_map = {r["name"]: r["id"] for r in prod_rows}
+        else:
+            prod_id_map = {}
+
+        if sales_records:
+            sale_rows = pg.execute(
+                """
+                INSERT INTO sales (venue_id, source, external_id, closed_at, business_date,
+                                   sale_type, state, total, channel, channel_detail, payload)
+                SELECT %s, 'fudo', x.external_id, x.closed_at::timestamptz, x.business_date::date,
+                       x.sale_type, x.state, x.total, x.channel, x.channel_detail, x.payload
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(
+                       external_id text, closed_at text, business_date text,
+                       sale_type text, state text, total numeric,
+                       channel text, channel_detail text, payload jsonb
+                  )
+                ON CONFLICT (venue_id, source, external_id) DO UPDATE
+                  SET closed_at = EXCLUDED.closed_at,
+                      business_date = EXCLUDED.business_date,
+                      sale_type = EXCLUDED.sale_type,
+                      state = EXCLUDED.state,
+                      total = EXCLUDED.total,
+                      channel = EXCLUDED.channel,
+                      channel_detail = EXCLUDED.channel_detail,
+                      payload = EXCLUDED.payload,
+                      fetched_at = now()
+                RETURNING id, external_id
+                """,
+                (venue_id, Jsonb(sales_records)),
+            ).fetchall()
+            sale_id_map = {r["external_id"]: r["id"] for r in sale_rows}
+            sale_ids = list(sale_id_map.values())
+            pg.execute("DELETE FROM sale_items WHERE sale_id = ANY(%s)", (sale_ids,))
+
+            flat_items = []
+            for ext_id, items in items_by_ext.items():
+                sid = sale_id_map.get(ext_id)
+                if not sid:
+                    continue
+                for it in items:
+                    flat_items.append(
+                        {
+                            "sale_id": sid,
+                            "product_id": prod_id_map.get(it["product"]),
+                            "quantity": it["quantity"],
+                            "unit_price": it["unit_price"],
+                            "line_total": it["line_total"],
+                            "unit_cost": it["unit_cost"],
+                            "line_cost": it["line_cost"],
+                        }
+                    )
+            if flat_items:
+                pg.execute(
+                    """
+                    INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, line_total,
+                                            unit_cost, line_cost, canceled)
+                    SELECT x.sale_id, x.product_id, x.quantity, x.unit_price, x.line_total,
+                           x.unit_cost, x.line_cost, false
+                      FROM jsonb_to_recordset(%s::jsonb) AS x(
+                           sale_id bigint, product_id bigint, quantity numeric,
+                           unit_price numeric, line_total numeric, unit_cost numeric, line_cost numeric
+                      )
+                    """,
+                    (Jsonb(flat_items),),
+                )
+
+            if synced_dates:
+                pg.execute(
+                    "DELETE FROM sales WHERE venue_id = %s AND source = 'sheet' AND business_date = ANY(%s)",
+                    (venue_id, list(synced_dates)),
+                )
+
         finish_run(pg, run_id, "ok", read, written)
         return {"run": run_id, "read": read, "written": written, "status": "ok"}
     except Exception as exc:  # noqa: BLE001
@@ -379,6 +541,12 @@ def sync_expenses(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> 
     read = written = 0
     page = 1
     try:
+        providers_set: set[str] = set()
+        exp_cats_set: set[str] = set()
+        ingredients_map: dict[str, str | None] = {}
+        expenses_records: list[dict] = []
+        items_by_ext: dict[str, list[dict]] = {}
+
         while page <= MAX_PAGES:
             q = dict(params)
             q["page[number]"] = page
@@ -399,11 +567,17 @@ def sync_expenses(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> 
                 read += 1
                 amount = float(attrs.get("amount") or 0)
                 prov_obj = inc.get(("Provider", str(rel_id(exp, "provider")))) if rel_id(exp, "provider") else None
-                prov_name = ((prov_obj or {}).get("attributes") or {}).get("name") or ""
-                prov_id = db.upsert_provider(pg, venue_id, prov_name) if prov_name else None
-                cat_obj = inc.get(("ExpenseCategory", str(rel_id(exp, "expenseCategory")))) if rel_id(exp, "expenseCategory") else None
-                cat_name = ((cat_obj or {}).get("attributes") or {}).get("name") or ""
-                cat_id = db.upsert_expense_category(pg, venue_id, cat_name) if cat_name else None
+                prov_name = (((prov_obj or {}).get("attributes") or {}).get("name") or "").strip()
+                if prov_name:
+                    providers_set.add(prov_name)
+                cat_obj = (
+                    inc.get(("ExpenseCategory", str(rel_id(exp, "expenseCategory"))))
+                    if rel_id(exp, "expenseCategory")
+                    else None
+                )
+                cat_name = (((cat_obj or {}).get("attributes") or {}).get("name") or "").strip()
+                if cat_name:
+                    exp_cats_set.add(cat_name)
 
                 item_ids = rel_id(exp, "expenseItems") or []
                 parsed = []
@@ -417,65 +591,182 @@ def sync_expenses(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> 
                     detail = ia.get("detail") or ""
                     qty = float(ia.get("quantity") or 0)
                     price = float(ia.get("price") or 0)
-                    ing = inc.get(("Ingredient", str(rel_id(item, "ingredient")))) if rel_id(item, "ingredient") else None
+                    ing = (
+                        inc.get(("Ingredient", str(rel_id(item, "ingredient"))))
+                        if rel_id(item, "ingredient")
+                        else None
+                    )
                     ing_attrs = (ing or {}).get("attributes") or {}
-                    ing_name = ing_attrs.get("name") or detail or ""
+                    ing_name = (ing_attrs.get("name") or detail or "").strip()
                     unit = ing_attrs.get("unit")
+                    if ing_name:
+                        ingredients_map.setdefault(ing_name, unit)
                     parsed.append({"detail": detail, "qty": qty, "price": price, "ing": ing_name, "unit": unit})
 
                 mode = _mode(parsed, amount)
-                row = pg.execute(
-                    """
-                    INSERT INTO expenses (venue_id, source, external_id, expense_date, amount, description,
-                                          provider_id, category_id, category_name, status, payload)
-                    VALUES (%s, 'fudo', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (venue_id, source, external_id) DO UPDATE
-                      SET expense_date = EXCLUDED.expense_date,
-                          amount = EXCLUDED.amount,
-                          description = EXCLUDED.description,
-                          provider_id = EXCLUDED.provider_id,
-                          category_id = EXCLUDED.category_id,
-                          category_name = EXCLUDED.category_name,
-                          status = EXCLUDED.status,
-                          payload = EXCLUDED.payload,
-                          fetched_at = now()
-                    RETURNING id
-                    """,
-                    (
-                        venue_id,
-                        str(exp.get("id")),
-                        ed,
-                        amount,
-                        attrs.get("description") or attrs.get("receiptNumber") or "",
-                        prov_id,
-                        cat_id,
-                        cat_name,
-                        attrs.get("status"),
-                        Jsonb(exp),
-                    ),
-                ).fetchone()
-                exp_id = row["id"]
-                pg.execute("DELETE FROM expense_items WHERE expense_id = %s", (exp_id,))
+                ext_id = str(exp.get("id"))
+                expenses_records.append(
+                    {
+                        "external_id": ext_id,
+                        "expense_date": ed.isoformat(),
+                        "amount": amount,
+                        "description": attrs.get("description") or attrs.get("receiptNumber") or "",
+                        "provider_name": prov_name,
+                        "category_name": cat_name,
+                        "status": attrs.get("status"),
+                        "payload": exp,
+                    }
+                )
+                exp_items_list = []
                 for it in parsed:
-                    ing_id = db.upsert_ingredient(pg, venue_id, it["ing"], it["unit"], None) if it["ing"] else None
                     if mode == "unidad":
-                        line_total = it["price"] * it["qty"]
+                        line_total = round(it["price"] * it["qty"], 2)
                         unit_price = it["price"]
                     else:
-                        line_total = it["price"]
-                        unit_price = (it["price"] / it["qty"]) if it["qty"] else None
-                    pg.execute(
-                        """
-                        INSERT INTO expense_items (expense_id, ingredient_id, detail, quantity, unit,
-                                                   unit_price, line_total, canceled)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-                        """,
-                        (exp_id, ing_id, it["detail"], it["qty"], it["unit"], unit_price, line_total),
+                        line_total = round(it["price"], 2)
+                        unit_price = round(it["price"] / it["qty"], 4) if it["qty"] else None
+                    exp_items_list.append(
+                        {
+                            "ing": it["ing"],
+                            "detail": it["detail"],
+                            "quantity": it["qty"],
+                            "unit": it["unit"],
+                            "unit_price": unit_price,
+                            "line_total": line_total,
+                        }
                     )
+                items_by_ext[ext_id] = exp_items_list
                 written += 1
+
             if len(expenses) < PAGE_SIZE:
                 break
             page += 1
+
+        if providers_set:
+            prov_rows = pg.execute(
+                """
+                INSERT INTO providers (venue_id, name)
+                SELECT %s, x.name
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(name text)
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING id, name
+                """,
+                (venue_id, Jsonb([{"name": n} for n in providers_set])),
+            ).fetchall()
+            prov_id_map = {r["name"]: r["id"] for r in prov_rows}
+        else:
+            prov_id_map = {}
+
+        if exp_cats_set:
+            ec_rows = pg.execute(
+                """
+                INSERT INTO expense_categories (venue_id, name)
+                SELECT %s, x.name
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(name text)
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING id, name
+                """,
+                (venue_id, Jsonb([{"name": n} for n in exp_cats_set])),
+            ).fetchall()
+            ec_id_map = {r["name"]: r["id"] for r in ec_rows}
+        else:
+            ec_id_map = {}
+
+        if ingredients_map:
+            ing_rows = pg.execute(
+                """
+                INSERT INTO ingredients (venue_id, name, unit)
+                SELECT %s, x.name, x.unit
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(name text, unit text)
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET unit = COALESCE(EXCLUDED.unit, ingredients.unit),
+                      updated_at = now()
+                RETURNING id, name
+                """,
+                (venue_id, Jsonb([{"name": k, "unit": v} for k, v in ingredients_map.items()])),
+            ).fetchall()
+            ing_id_map = {r["name"]: r["id"] for r in ing_rows}
+        else:
+            ing_id_map = {}
+
+        if expenses_records:
+            exp_payload = [
+                {
+                    "external_id": e["external_id"],
+                    "expense_date": e["expense_date"],
+                    "amount": e["amount"],
+                    "description": e["description"],
+                    "provider_id": prov_id_map.get(e["provider_name"]) if e["provider_name"] else None,
+                    "category_id": ec_id_map.get(e["category_name"]) if e["category_name"] else None,
+                    "category_name": e["category_name"],
+                    "status": e["status"],
+                    "payload": e["payload"],
+                }
+                for e in expenses_records
+            ]
+            exp_rows = pg.execute(
+                """
+                INSERT INTO expenses (venue_id, source, external_id, expense_date, amount, description,
+                                      provider_id, category_id, category_name, status, payload)
+                SELECT %s, 'fudo', x.external_id, x.expense_date::date, x.amount, x.description,
+                       x.provider_id, x.category_id, x.category_name, x.status, x.payload
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(
+                       external_id text, expense_date text, amount numeric, description text,
+                       provider_id bigint, category_id bigint, category_name text,
+                       status text, payload jsonb
+                  )
+                ON CONFLICT (venue_id, source, external_id) DO UPDATE
+                  SET expense_date = EXCLUDED.expense_date,
+                      amount = EXCLUDED.amount,
+                      description = EXCLUDED.description,
+                      provider_id = EXCLUDED.provider_id,
+                      category_id = EXCLUDED.category_id,
+                      category_name = EXCLUDED.category_name,
+                      status = EXCLUDED.status,
+                      payload = EXCLUDED.payload,
+                      fetched_at = now()
+                RETURNING id, external_id
+                """,
+                (venue_id, Jsonb(exp_payload)),
+            ).fetchall()
+            exp_id_map = {r["external_id"]: r["id"] for r in exp_rows}
+            exp_ids = list(exp_id_map.values())
+            pg.execute("DELETE FROM expense_items WHERE expense_id = ANY(%s)", (exp_ids,))
+
+            flat_items = []
+            for ext_id, items in items_by_ext.items():
+                eid = exp_id_map.get(ext_id)
+                if not eid:
+                    continue
+                for it in items:
+                    flat_items.append(
+                        {
+                            "expense_id": eid,
+                            "ingredient_id": ing_id_map.get(it["ing"]) if it["ing"] else None,
+                            "detail": it["detail"],
+                            "quantity": it["quantity"],
+                            "unit": it["unit"],
+                            "unit_price": it["unit_price"],
+                            "line_total": it["line_total"],
+                        }
+                    )
+            if flat_items:
+                pg.execute(
+                    """
+                    INSERT INTO expense_items (expense_id, ingredient_id, detail, quantity, unit,
+                                               unit_price, line_total, canceled)
+                    SELECT x.expense_id, x.ingredient_id, x.detail, x.quantity, x.unit,
+                           x.unit_price, x.line_total, false
+                      FROM jsonb_to_recordset(%s::jsonb) AS x(
+                           expense_id bigint, ingredient_id bigint, detail text,
+                           quantity numeric, unit text, unit_price numeric, line_total numeric
+                      )
+                    """,
+                    (Jsonb(flat_items),),
+                )
+
         finish_run(pg, run_id, "ok", read, written)
         return {"run": run_id, "read": read, "written": written, "status": "ok"}
     except Exception as exc:  # noqa: BLE001
@@ -491,26 +782,44 @@ def sync_ingredients(pg, venue_id: int, client: FudoClient) -> dict:
     read = written = 0
     page = 1
     try:
+        batch = []
         while page <= MAX_PAGES:
             data = client.get("/ingredients", {"page[size]": PAGE_SIZE, "page[number]": page})
             rows = data.get("data") or []
             for ing in rows:
                 read += 1
                 a = ing.get("attributes") or {}
-                if not a.get("name"):
+                name = (a.get("name") or "").strip()
+                if not name:
                     continue
-                db.upsert_ingredient(
-                    pg,
-                    venue_id,
-                    a["name"],
-                    a.get("unit"),
-                    float(a["cost"]) if a.get("cost") is not None else None,
-                    str(ing.get("id")),
+                batch.append(
+                    {
+                        "fudo_id": str(ing.get("id")),
+                        "name": name,
+                        "unit": a.get("unit"),
+                        "cost": float(a["cost"]) if a.get("cost") is not None else None,
+                    }
                 )
                 written += 1
             if len(rows) < PAGE_SIZE:
                 break
             page += 1
+        if batch:
+            pg.execute(
+                """
+                INSERT INTO ingredients (venue_id, fudo_id, name, unit, cost)
+                SELECT %s, x.fudo_id, x.name, x.unit, x.cost
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(
+                       fudo_id text, name text, unit text, cost numeric
+                  )
+                ON CONFLICT (venue_id, name) DO UPDATE
+                  SET fudo_id = COALESCE(ingredients.fudo_id, EXCLUDED.fudo_id),
+                      unit = COALESCE(EXCLUDED.unit, ingredients.unit),
+                      cost = COALESCE(EXCLUDED.cost, ingredients.cost),
+                      updated_at = now()
+                """,
+                (venue_id, Jsonb(batch)),
+            )
         finish_run(pg, run_id, "ok", read, written)
         return {"run": run_id, "read": read, "written": written, "status": "ok"}
     except Exception as exc:  # noqa: BLE001

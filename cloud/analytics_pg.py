@@ -872,15 +872,39 @@ import urllib.request as _urlreq
 from pathlib import Path as _Path
 from urllib.parse import urlparse as _urlparse
 
-_fudo_sync_lock = _threading.Lock()
+from . import db as _db_mod
+
+_fudo_sync_lock = getattr(_db_mod, "_fudo_sync_lock", None) or _threading.Lock()
+_db_mod._fudo_sync_lock = _fudo_sync_lock
+
+
+def _resolve_sync_range(payload: dict, default_days: int = 10) -> tuple[date, date]:
+    today = today_ar()
+    days = max(1, min(62, int(payload.get("days") or default_days)))
+    d1 = today
+    d0 = today - timedelta(days=days)
+    try:
+        if payload.get("from"):
+            req_d0 = date.fromisoformat(str(payload["from"])[:10])
+            d0 = min(d0, req_d0)
+        if payload.get("to"):
+            req_d1 = date.fromisoformat(str(payload["to"])[:10])
+            d1 = max(d1, min(today, req_d1))
+    except ValueError:
+        pass
+    if d0 > d1:
+        d0, d1 = d1, d0
+    if (d1 - d0).days > 62:
+        d0 = d1 - timedelta(days=62)
+    return d0, d1
 
 
 def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
     """Sincroniza ventas y gastos de Fudo hacia Postgres desde el servidor web."""
     from . import db as _db, ingest as _ingest, recompute as _recompute
 
-    # Si ingest.py en el contenedor era de una versión previa sin save_credentials, lo actualiza en caliente
-    if not hasattr(_ingest, "save_credentials"):
+    # Si ingest.py en el contenedor era de una versión previa sin _CATALOG_CACHE, lo actualiza en caliente
+    if not hasattr(_ingest, "_CATALOG_CACHE"):
         try:
             repo = _os.environ.get("GITHUB_REPO", "CodeHvrd/GesT-System")
             branch = _os.environ.get("GITHUB_BRANCH", "main")
@@ -898,13 +922,11 @@ def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
     payload = payload or {}
     api_key = str(payload.get("api_key") or "").strip()
     api_secret = str(payload.get("api_secret") or "").strip()
-    days = max(1, min(60, int(payload.get("days") or days)))
 
-    if not _fudo_sync_lock.acquire(blocking=False):
+    if not _fudo_sync_lock.acquire(timeout=30):
         return {"ok": False, "error": "Ya hay una sincronización en curso. Esperá unos segundos."}
     try:
-        d1 = today_ar()
-        d0 = d1 - timedelta(days=days)
+        d0, d1 = _resolve_sync_range(payload, days)
         with _db.connect() as pg:
             vid = _db.ensure_venue(pg, "bois")
             if api_key and api_secret and hasattr(_ingest, "save_credentials"):
@@ -945,6 +967,12 @@ def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
 
 def _patch_live_handler() -> None:
     """Inyecta /api/sync en el Handler en ejecución cuando se recarga analytics_pg en caliente."""
+    try:
+        from . import ingest as _ing_mod, recompute as _rec_mod
+        _importlib.reload(_ing_mod)
+        _importlib.reload(_rec_mod)
+    except Exception:  # noqa: BLE001
+        pass
     for mod in list(_sys.modules.values()):
         cls = getattr(mod, "Handler", None)
         if cls is None or not hasattr(cls, "do_POST"):

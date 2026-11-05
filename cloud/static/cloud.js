@@ -479,15 +479,18 @@ async function syncFudo(extra = {}, _retried = false) {
   const form = $('#fudo-creds-form');
   if (btn) { btn.disabled = true; btn.textContent = 'Sincronizando Fudo…'; }
   if (msg) { msg.hidden = false; msg.textContent = 'Consultando ventas y gastos en Fudo…'; }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 55000);
   try {
     const res = await fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ days: 10, ...extra }),
+      body: JSON.stringify({ days: 10, from: state.from, to: state.to, ...extra }),
+      signal: ctrl.signal,
     });
     const json = await res.json();
     if (!json.ok) {
-      if (!_retried && (res.status === 404 || String(json.error || '').includes('desconocido'))) {
+      if (!_retried && (res.status === 404 || String(json.error || '').includes('desconocido') || String(json.error || '').includes('en curso'))) {
         if (msg) msg.textContent = 'Actualizando servidor en vivo…';
         await fetch('/api/update', {
           method: 'POST',
@@ -505,11 +508,16 @@ async function syncFudo(extra = {}, _retried = false) {
     }
     if (form) form.hidden = true;
     const v = (json.data && json.data.ventas) || {};
-    if (msg) msg.textContent = `Fudo sincronizado (${v.written ?? 0} ventas actualizadas).`;
+    const g = (json.data && json.data.gastos) || {};
+    if (msg) {
+      msg.textContent = `Fudo sincronizado (${v.written ?? 0} ventas${g.written != null ? ` · ${g.written} gastos` : ''} actualizados).`;
+    }
     await load(true);
   } catch (err) {
-    if (msg) { msg.hidden = false; msg.textContent = `Error Fudo: ${err.message}`; }
+    const text = err.name === 'AbortError' ? 'La consulta tardó demasiado; volvé a intentar.' : err.message;
+    if (msg) { msg.hidden = false; msg.textContent = `Error Fudo: ${text}`; }
   } finally {
+    clearTimeout(timer);
     if (btn) { btn.disabled = false; btn.textContent = '↻ Sincronizar Fudo'; }
   }
 }

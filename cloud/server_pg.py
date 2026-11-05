@@ -68,7 +68,29 @@ HotReloadFiles = (
     "cloud/worker.py",
 )
 
-_sync_lock = threading.Lock()
+_sync_lock = getattr(db, "_fudo_sync_lock", None) or threading.Lock()
+db._fudo_sync_lock = _sync_lock
+
+
+def _resolve_sync_range(payload: dict, default_days: int = 10) -> tuple[date, date]:
+    today = an.today_ar()
+    days = max(1, min(62, int(payload.get("days") or default_days)))
+    d1 = today
+    d0 = today - timedelta(days=days)
+    try:
+        if payload.get("from"):
+            req_d0 = date.fromisoformat(str(payload["from"])[:10])
+            d0 = min(d0, req_d0)
+        if payload.get("to"):
+            req_d1 = date.fromisoformat(str(payload["to"])[:10])
+            d1 = max(d1, min(today, req_d1))
+    except ValueError:
+        pass
+    if d0 > d1:
+        d0, d1 = d1, d0
+    if (d1 - d0).days > 62:
+        d0 = d1 - timedelta(days=62)
+    return d0, d1
 
 
 def sync_fudo_now(payload: dict | None = None, days: int = 10) -> dict:
@@ -76,13 +98,11 @@ def sync_fudo_now(payload: dict | None = None, days: int = 10) -> dict:
     payload = payload or {}
     api_key = str(payload.get("api_key") or "").strip()
     api_secret = str(payload.get("api_secret") or "").strip()
-    days = max(1, min(60, int(payload.get("days") or days)))
 
-    if not _sync_lock.acquire(blocking=False):
+    if not _sync_lock.acquire(timeout=30):
         return {"ok": False, "error": "Ya hay una sincronización en curso. Esperá unos segundos."}
     try:
-        d1 = an.today_ar()
-        d0 = d1 - timedelta(days=days)
+        d0, d1 = _resolve_sync_range(payload, days)
         with db.connect() as pg:
             vid = db.ensure_venue(pg, "bois")
             if api_key and api_secret:
@@ -182,6 +202,8 @@ def check_update() -> dict:
             dest.write_bytes(content)
             updated_files.append(rel)
 
+    importlib.reload(ingest)
+    importlib.reload(recompute)
     importlib.reload(an)
     prev = VERSION
     VERSION_FULL = latest

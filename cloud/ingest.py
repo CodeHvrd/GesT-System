@@ -227,16 +227,18 @@ def fetch_product_catalog(client: FudoClient, use_cache: bool = True) -> dict[st
 
 
 def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dict:
+    pg.execute("ALTER TABLE sales ADD COLUMN IF NOT EXISTS cash_amount numeric(12,2) NOT NULL DEFAULT 0")
+    pg.execute("ALTER TABLE sales ADD COLUMN IF NOT EXISTS virtual_amount numeric(12,2) NOT NULL DEFAULT 0")
     run_id = start_run(pg, venue_id, "fudo_sales", d0, d1)
     # Argentina es UTC-3: el día local empieza a las 03:00Z
     start = f"{d0.isoformat()}T03:00:00Z"
     end = f"{(d1 + timedelta(days=1)).isoformat()}T03:00:00Z"
     params = {
         "filter[closedAt]": f"and(gte.{start},lt.{end})",
-        "include": "items.product,items.product.productCategory,orders",
+        "include": "items.product,items.product.productCategory,orders,payments,payments.paymentMethod",
         "page[size]": PAGE_SIZE,
         "sort": "id",
-        "fields[sale]": "closedAt,createdAt,total,saleType,saleState,items,orders",
+        "fields[sale]": "closedAt,createdAt,total,saleType,saleState,items,orders,payments",
         "fields[product]": "name,productCategory",
         "fields[productCategory]": "name",
         "fields[order]": "origin",
@@ -354,6 +356,42 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
                 mode = _mode(parsed, total)
                 ext_id = str(sale.get("id"))
                 synced_dates.add(bdate)
+
+                cash_amt = 0.0
+                virtual_amt = 0.0
+                pay_methods: dict[str, float] = {}
+                for pay_id in rel_id(sale, "payments") or []:
+                    pay = inc.get(("Payment", str(pay_id)))
+                    if not pay:
+                        continue
+                    pa = pay.get("attributes") or {}
+                    if pa.get("canceled"):
+                        continue
+                    p_amt = float(pa.get("amount") or 0)
+                    pmid = rel_id(pay, "paymentMethod")
+                    pm = inc.get(("PaymentMethod", str(pmid))) if pmid else None
+                    pma = (pm or {}).get("attributes") or {}
+                    pm_name = (pma.get("name") or "Otro").strip()
+                    pm_code = (pma.get("code") or "").strip().lower()
+                    pay_methods[pm_name] = round(pay_methods.get(pm_name, 0.0) + p_amt, 2)
+                    if pm_code == "cash" or "efectivo" in pm_name.lower():
+                        cash_amt += p_amt
+                    else:
+                        virtual_amt += p_amt
+                if cash_amt == 0.0 and virtual_amt == 0.0 and total > 0:
+                    if channel == "delivery":
+                        virtual_amt = total
+                        pay_methods["Online Pedidos Ya"] = round(total, 2)
+                    else:
+                        cash_amt = total
+                        pay_methods["Efectivo"] = round(total, 2)
+
+                sale_payload = dict(sale)
+                sale_payload["payments_summary"] = {
+                    "cash": round(cash_amt, 2),
+                    "virtual": round(virtual_amt, 2),
+                    "methods": pay_methods,
+                }
                 sales_records.append(
                     {
                         "external_id": ext_id,
@@ -364,7 +402,9 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
                         "total": total,
                         "channel": channel,
                         "channel_detail": channel_detail,
-                        "payload": sale,
+                        "cash_amount": round(cash_amt, 2),
+                        "virtual_amount": round(virtual_amt, 2),
+                        "payload": sale_payload,
                     }
                 )
                 sale_items_list = []
@@ -451,13 +491,16 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
             sale_rows = pg.execute(
                 """
                 INSERT INTO sales (venue_id, source, external_id, closed_at, business_date,
-                                   sale_type, state, total, channel, channel_detail, payload)
+                                   sale_type, state, total, channel, channel_detail,
+                                   cash_amount, virtual_amount, payload)
                 SELECT %s, 'fudo', x.external_id, x.closed_at::timestamptz, x.business_date::date,
-                       x.sale_type, x.state, x.total, x.channel, x.channel_detail, x.payload
+                       x.sale_type, x.state, x.total, x.channel, x.channel_detail,
+                       COALESCE(x.cash_amount, 0), COALESCE(x.virtual_amount, 0), x.payload
                   FROM jsonb_to_recordset(%s::jsonb) AS x(
                        external_id text, closed_at text, business_date text,
                        sale_type text, state text, total numeric,
-                       channel text, channel_detail text, payload jsonb
+                       channel text, channel_detail text,
+                       cash_amount numeric, virtual_amount numeric, payload jsonb
                   )
                 ON CONFLICT (venue_id, source, external_id) DO UPDATE
                   SET closed_at = EXCLUDED.closed_at,
@@ -467,6 +510,8 @@ def sync_sales(pg, venue_id: int, client: FudoClient, d0: date, d1: date) -> dic
                       total = EXCLUDED.total,
                       channel = EXCLUDED.channel,
                       channel_detail = EXCLUDED.channel_detail,
+                      cash_amount = EXCLUDED.cash_amount,
+                      virtual_amount = EXCLUDED.virtual_amount,
                       payload = EXCLUDED.payload,
                       fetched_at = now()
                 RETURNING id, external_id
@@ -825,6 +870,221 @@ def sync_ingredients(pg, venue_id: int, client: FudoClient) -> dict:
     except Exception as exc:  # noqa: BLE001
         finish_run(pg, run_id, "error", read, written, str(exc))
         raise
+
+
+# ------------------------------------------------------------------ planillas (Gestión y Contable)
+
+SHEET_GESTION_ID = "1pfqxfnFSHb291bF2lSDuRs_czDu1v0YcI3W1NE79mJ0"
+SHEET_GESTION_GASTOS_GID = 133421437
+SHEET_CONTABLE_ID = "1gNitzY7n44UYr1FP-RFpIPchRT4A1oSh"
+
+
+def _parse_xlsx_rows(raw_bytes: bytes) -> list[list[str]]:
+    """Lee la primera hoja de un archivo .xlsx usando solo la librería estándar."""
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.iter():
+                if si.tag.endswith("}si") or si.tag == "si":
+                    texts = [
+                        t.text or ""
+                        for t in si.iter()
+                        if t.tag.endswith("}t") or t.tag == "t"
+                    ]
+                    shared.append("".join(texts))
+        sheets = sorted(
+            n for n in zf.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")
+        )
+        if not sheets:
+            return []
+        ws = ET.fromstring(zf.read(sheets[0]))
+        rows_out: list[list[str]] = []
+        for row_el in ws.iter():
+            if not (row_el.tag.endswith("}row") or row_el.tag == "row"):
+                continue
+            row_vals: list[str] = []
+            for c_el in row_el:
+                if not (c_el.tag.endswith("}c") or c_el.tag == "c"):
+                    continue
+                t_attr = c_el.attrib.get("t", "")
+                val = ""
+                for child in c_el:
+                    if child.tag.endswith("}v") or child.tag == "v":
+                        val = child.text or ""
+                    elif child.tag.endswith("}is") or child.tag == "is":
+                        val = "".join(
+                            t.text or ""
+                            for t in child.iter()
+                            if t.tag.endswith("}t") or t.tag == "t"
+                        )
+                if t_attr == "s" and val.isdigit():
+                    idx = int(val)
+                    if 0 <= idx < len(shared):
+                        val = shared[idx]
+                row_vals.append(val.strip())
+            if any(row_vals):
+                rows_out.append(row_vals)
+        return rows_out
+
+
+def sync_sheets(pg, venue_id: int) -> dict:
+    """Sincroniza los gastos de la Planilla Gestión y verifica la Planilla Contable."""
+    from app import sync as app_sync
+
+    result: dict = {"gestion": {"status": "skipped", "written": 0}, "contable": {"status": "skipped", "written": 0}}
+    # 1. Planilla Gestión (Gastos: Reposiciones + Externos Variables + Fijos)
+    try:
+        cfg = {
+            "sheet_id": os.environ.get("SHEET_GESTION_ID", SHEET_GESTION_ID),
+            "tabs": {"gastos": {"name": "Gastos", "gid": SHEET_GESTION_GASTOS_GID}},
+        }
+        rows, _, _ = app_sync.fetch_tab(cfg, "gastos")
+        items, warns, _ = app_sync.normalize_expenses(rows)
+        if items:
+            cat_names = sorted({(it.get("categoria") or "Sin categoría").strip() for it in items})
+            prov_names = sorted({(it.get("descripcion") or "").strip() for it in items if (it.get("descripcion") or "").strip()})
+            cat_map = {}
+            if cat_names:
+                c_rows = pg.execute(
+                    """
+                    INSERT INTO expense_categories (venue_id, name)
+                    SELECT %s, x.name FROM jsonb_to_recordset(%s::jsonb) AS x(name text)
+                    ON CONFLICT (venue_id, name) DO UPDATE SET name = EXCLUDED.name
+                    RETURNING id, name
+                    """,
+                    (venue_id, Jsonb([{"name": c} for c in cat_names])),
+                ).fetchall()
+                cat_map = {r["name"]: r["id"] for r in c_rows}
+            prov_map = {}
+            if prov_names:
+                p_rows = pg.execute(
+                    """
+                    INSERT INTO providers (venue_id, name)
+                    SELECT %s, x.name FROM jsonb_to_recordset(%s::jsonb) AS x(name text)
+                    ON CONFLICT (venue_id, name) DO UPDATE SET name = EXCLUDED.name
+                    RETURNING id, name
+                    """,
+                    (venue_id, Jsonb([{"name": p} for p in prov_names])),
+                ).fetchall()
+                prov_map = {r["name"]: r["id"] for r in p_rows}
+
+            payload_rows = []
+            seen_hashes = set()
+            for it in items:
+                h = it["hash"]
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                cname = (it.get("categoria") or "Sin categoría").strip()
+                pname = (it.get("descripcion") or "").strip()
+                payload_rows.append(
+                    {
+                        "external_id": h,
+                        "expense_date": it["fecha"],
+                        "amount": float(it.get("monto") or 0),
+                        "description": pname,
+                        "provider_id": prov_map.get(pname) if pname else None,
+                        "category_id": cat_map.get(cname),
+                        "category_name": cname,
+                        "payload": it,
+                    }
+                )
+            pg.execute("DELETE FROM expenses WHERE venue_id = %s AND source = 'sheet'", (venue_id,))
+            pg.execute(
+                """
+                INSERT INTO expenses (venue_id, source, external_id, expense_date, amount,
+                                      description, provider_id, category_id, category_name, status, payload)
+                SELECT %s, 'sheet', x.external_id, x.expense_date::date, x.amount,
+                       x.description, x.provider_id, x.category_id, x.category_name, 'cargado', x.payload
+                  FROM jsonb_to_recordset(%s::jsonb) AS x(
+                       external_id text, expense_date text, amount numeric, description text,
+                       provider_id bigint, category_id bigint, category_name text, payload jsonb
+                  )
+                ON CONFLICT (venue_id, source, external_id) DO UPDATE
+                  SET expense_date = EXCLUDED.expense_date,
+                      amount = EXCLUDED.amount,
+                      description = EXCLUDED.description,
+                      provider_id = EXCLUDED.provider_id,
+                      category_id = EXCLUDED.category_id,
+                      category_name = EXCLUDED.category_name,
+                      payload = EXCLUDED.payload,
+                      fetched_at = now()
+                """,
+                (venue_id, Jsonb(payload_rows)),
+            )
+            result["gestion"] = {"status": "ok", "written": len(payload_rows), "warnings": warns[:3]}
+    except Exception as exc:  # noqa: BLE001
+        result["gestion"] = {"status": "error", "error": str(exc)}
+
+    # 2. Planilla Contable (para corroborar Gastos Fudo / Reposiciones)
+    contable_id = os.environ.get("SHEET_CONTABLE_ID", SHEET_CONTABLE_ID)
+    contable_rows: list[list[str]] = []
+    contable_err = ""
+    for url, fmt in [
+        (f"https://docs.google.com/spreadsheets/d/{contable_id}/export?format=csv", "csv"),
+        (f"https://docs.google.com/spreadsheets/d/{contable_id}/export?format=xlsx", "xlsx"),
+        (f"https://drive.google.com/uc?export=download&id={contable_id}", "xlsx"),
+    ]:
+        try:
+            raw = app_sync._http_get(url, timeout=12)
+            if raw.startswith(b"<!doctype html") or raw.startswith(b"<html"):
+                contable_err = "needs_access"
+                continue
+            if fmt == "csv":
+                contable_rows = app_sync.parse_csv(raw.decode("utf-8-sig", "replace"))
+            else:
+                contable_rows = _parse_xlsx_rows(raw)
+            if contable_rows:
+                break
+        except Exception as exc:  # noqa: BLE001
+            err_s = str(exc)
+            if "401" in err_s or "403" in err_s:
+                contable_err = "needs_access"
+            else:
+                contable_err = err_s
+
+    if contable_rows:
+        try:
+            c_items, _, _ = app_sync.normalize_expenses(contable_rows)
+            result["contable"] = {"status": "ok", "rows": len(c_items)}
+            pg.execute(
+                """
+                INSERT INTO settings (venue_id, key, value)
+                VALUES (%s, 'contable_sheet', %s)
+                ON CONFLICT (venue_id, key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (venue_id, Jsonb({"status": "ok", "rows": len(c_items), "items": c_items[:2000]})),
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["contable"] = {"status": "parsed_raw", "rows": len(contable_rows), "note": str(exc)}
+    else:
+        status_code = "needs_access" if contable_err == "needs_access" else "error"
+        result["contable"] = {
+            "status": status_code,
+            "sheet_id": contable_id,
+            "message": (
+                "La Planilla Contable requiere permiso de lectura ('Cualquier persona con el enlace puede ver'). "
+                "Mientras tanto se corrobora Fudo contra las Reposiciones de la Planilla Gestión."
+            ),
+        }
+        try:
+            pg.execute(
+                """
+                INSERT INTO settings (venue_id, key, value)
+                VALUES (%s, 'contable_sheet', %s)
+                ON CONFLICT (venue_id, key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (venue_id, Jsonb(result["contable"])),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return result
 
 
 # ------------------------------------------------------------------ CLI

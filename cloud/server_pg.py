@@ -124,6 +124,14 @@ def sync_fudo_now(payload: dict | None = None, days: int = 10) -> dict:
             except Exception as exc:  # noqa: BLE001
                 pg.rollback()
                 gastos = {"status": "error", "error": str(exc)}
+            planillas = {}
+            if hasattr(ingest, "sync_sheets"):
+                try:
+                    planillas = ingest.sync_sheets(pg, vid)
+                    pg.commit()
+                except Exception as exc:  # noqa: BLE001
+                    pg.rollback()
+                    planillas = {"status": "error", "error": str(exc)}
             agregados = recompute.recompute(pg, vid)
             pg.commit()
         return {
@@ -132,6 +140,7 @@ def sync_fudo_now(payload: dict | None = None, days: int = 10) -> dict:
                 "rango": f"{d0.isoformat()} → {d1.isoformat()}",
                 "ventas": ventas,
                 "gastos": gastos,
+                "planillas": planillas,
                 "agregados": agregados,
             },
         }

@@ -77,12 +77,22 @@ def previous_range(d0: date, d1: date) -> tuple[date, date]:
 # ------------------------------------------------------------------ consultas
 
 
+def _norm_provider(name: str) -> str:
+    """Normaliza nombres de proveedor para cruzar Planilla vs Fudo API."""
+    t = norm(name)
+    for drop in ("carniceria", "frigorifico", "distribuidora", "srl", "sa", "s.a.", "proveedor"):
+        t = t.replace(drop, " ")
+    return "".join(t.split())
+
+
 def _totals(conn, venue_id: int, d0: date, d1: date) -> dict:
     row = conn.execute(
         """
-        SELECT COALESCE(SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_total ELSE 0 END), 0) AS menu_ventas,
+        SELECT COALESCE(SUM(CASE WHEN s.channel = 'salon'    THEN si.line_total ELSE 0 END), 0) AS salon_ventas,
+               COALESCE(SUM(CASE WHEN s.channel = 'takeaway' THEN si.line_total ELSE 0 END), 0) AS takeaway_ventas,
+               COALESCE(SUM(CASE WHEN s.channel = 'delivery' THEN si.line_total ELSE 0 END), 0) AS apps_ventas,
+               COALESCE(SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_total ELSE 0 END), 0) AS menu_ventas,
                COALESCE(SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_cost  ELSE 0 END), 0) AS menu_cmv,
-               COALESCE(SUM(CASE WHEN s.channel  = 'delivery' THEN si.line_total ELSE 0 END), 0) AS delivery_ventas,
                COALESCE(SUM(si.line_total), 0) AS ventas,
                COALESCE(SUM(si.line_cost), 0)  AS cmv,
                COUNT(DISTINCT s.id) AS ventas_n
@@ -95,42 +105,134 @@ def _totals(conn, venue_id: int, d0: date, d1: date) -> dict:
         """,
         (venue_id, d0, d1),
     ).fetchone()
+
+    pay_row = conn.execute(
+        """
+        SELECT COALESCE(SUM(COALESCE(cash_amount, 0)), 0) AS efectivo,
+               COALESCE(SUM(COALESCE(virtual_amount, 0)), 0) AS virtual_amt,
+               COALESCE(SUM(total), 0) AS sale_total
+          FROM sales
+         WHERE venue_id = %s
+           AND state = 'CLOSED'
+           AND business_date BETWEEN %s AND %s
+        """,
+        (venue_id, d0, d1),
+    ).fetchone()
+
+    pm_rows = conn.execute(
+        """
+        SELECT m.key AS metodo, SUM((m.value)::numeric) AS monto
+          FROM sales s,
+               LATERAL jsonb_each_text(COALESCE(s.payload->'payments_summary'->'methods', '{}'::jsonb)) AS m
+         WHERE s.venue_id = %s
+           AND s.state = 'CLOSED'
+           AND s.business_date BETWEEN %s AND %s
+         GROUP BY 1
+         ORDER BY 2 DESC
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+
+    ventas_tot = f(row["ventas"])
+    salon_v = f(row["salon_ventas"])
+    takeaway_v = f(row["takeaway_ventas"])
+    apps_v = f(row["apps_ventas"])
+    delivery_total_v = takeaway_v + apps_v
     menu_v, menu_c = f(row["menu_ventas"]), f(row["menu_cmv"])
+
+    efectivo_v = f(pay_row["efectivo"])
+    virtual_v = f(pay_row["virtual_amt"])
+    pay_sum = efectivo_v + virtual_v
+    # Si las ventas se mide por suma de ítems, escalamos proporcionalmente para que sume igual que ventas_tot
+    if pay_sum > 0 and ventas_tot > 0 and abs(pay_sum - ventas_tot) > 1:
+        scale = ventas_tot / pay_sum
+        efectivo_v *= scale
+        virtual_v *= scale
+    elif pay_sum == 0 and ventas_tot > 0:
+        virtual_v = apps_v
+        efectivo_v = max(0.0, ventas_tot - virtual_v)
+
+    pm_total = sum(f(x["monto"]) for x in pm_rows) or 1.0
+    medios_pago = []
+    for x in pm_rows:
+        m_name = str(x["metodo"] or "Otro")
+        m_val = f(x["monto"])
+        is_cash = "efectivo" in m_name.lower() or m_name.lower() == "cash"
+        medios_pago.append({
+            "metodo": m_name,
+            "monto": r(m_val),
+            "pct": r(m_val / pm_total * 100, 1),
+            "tipo": "efectivo" if is_cash else "virtual",
+        })
+
     return {
-        "ventas": r(row["ventas"]),
+        "ventas": r(ventas_tot),
+        "ventas_salon": r(salon_v),
+        "ventas_delivery": r(delivery_total_v),
+        "ventas_delivery_propio": r(takeaway_v),
+        "ventas_delivery_apps": r(apps_v),
         "ventas_menu": r(menu_v),
-        "ventas_delivery": r(row["delivery_ventas"]),
+        "salon_pct": r(salon_v / ventas_tot * 100, 1) if ventas_tot else 0.0,
+        "delivery_pct": r(delivery_total_v / ventas_tot * 100, 1) if ventas_tot else 0.0,
+        "efectivo": r(efectivo_v),
+        "virtual": r(virtual_v),
+        "efectivo_pct": r(efectivo_v / (efectivo_v + virtual_v) * 100, 1) if (efectivo_v + virtual_v) else 0.0,
+        "virtual_pct": r(virtual_v / (efectivo_v + virtual_v) * 100, 1) if (efectivo_v + virtual_v) else 0.0,
+        "medios_pago": medios_pago,
         "cmv": r(menu_c),
         "cmv_pct": r(menu_c / menu_v * 100, 1) if menu_v else 0.0,
         "ganancia": r(menu_v - menu_c),
         "ventas_n": int(row["ventas_n"] or 0),
-        "ticket": r(menu_v / row["ventas_n"], 0) if row["ventas_n"] else 0,
+        "ticket": r(ventas_tot / row["ventas_n"], 0) if row["ventas_n"] else 0,
     }
 
 
 def _expenses(conn, venue_id: int, d0: date, d1: date) -> dict:
     row = conn.execute(
         """
-        WITH b AS (
-            SELECT source, SUM(amount) t, COUNT(*) n
-              FROM expenses
-             WHERE venue_id = %s AND expense_date BETWEEN %s AND %s
-             GROUP BY source
-        )
-        SELECT COALESCE((SELECT t FROM b WHERE source = 'sheet'), (SELECT t FROM b WHERE source = 'fudo'), 0) AS gastos,
-               COALESCE((SELECT n FROM b WHERE source = 'sheet'), (SELECT n FROM b WHERE source = 'fudo'), 0) AS gastos_n,
-               COALESCE((SELECT t FROM b WHERE source = 'sheet'), 0) AS planilla,
-               COALESCE((SELECT t FROM b WHERE source = 'fudo'), 0) AS fudo,
-               (SELECT source FROM b ORDER BY CASE source WHEN 'sheet' THEN 1 WHEN 'fudo' THEN 2 ELSE 3 END LIMIT 1) AS fuente
+        SELECT COALESCE(SUM(CASE WHEN source = 'fudo' THEN amount ELSE 0 END), 0) AS fudo_api,
+               COUNT(*) FILTER (WHERE source = 'fudo') AS fudo_n,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) LIKE 'reposic%%'
+                                 THEN amount ELSE 0 END), 0) AS sheet_repo,
+               COUNT(*) FILTER (WHERE source = 'sheet' AND LOWER(COALESCE(category_name, '')) LIKE 'reposic%%') AS sheet_repo_n,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', 'variable')) <> 'fijo'
+                                 THEN amount ELSE 0 END), 0) AS sheet_ext_var,
+               COUNT(*) FILTER (WHERE source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', 'variable')) <> 'fijo') AS sheet_ext_var_n,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', '')) = 'fijo'
+                                 THEN amount ELSE 0 END), 0) AS sheet_fijos,
+               COUNT(*) FILTER (WHERE source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', '')) = 'fijo') AS sheet_fijos_n
+          FROM expenses
+         WHERE venue_id = %s AND expense_date BETWEEN %s AND %s
         """,
         (venue_id, d0, d1),
     ).fetchone()
+    fudo_api = f(row["fudo_api"])
+    sheet_repo = f(row["sheet_repo"])
+    sheet_ext_var = f(row["sheet_ext_var"])
+    sheet_fijos = f(row["sheet_fijos"])
+
+    # En gastos Fudo/Contable: si hay reposiciones en planilla usamos el mayor/planilla y exponemos ambos para comparar
+    fudo_efectivo = max(sheet_repo, fudo_api) if sheet_repo > 0 else fudo_api
+    fuente = "sheet" if sheet_repo >= fudo_api and sheet_repo > 0 else ("fudo" if fudo_api > 0 else "sin datos")
+    diff_fudo_planilla = r(sheet_repo - fudo_api) if (sheet_repo or fudo_api) else 0.0
+
     return {
-        "total": r(row["gastos"]),
-        "n": int(row["gastos_n"] or 0),
-        "planilla": r(row["planilla"]),
-        "fudo": r(row["fudo"]),
-        "fuente": row["fuente"] or "sin datos",
+        "total": r(fudo_efectivo),
+        "n": int((row["sheet_repo_n"] if fuente == "sheet" else row["fudo_n"]) or 0),
+        "planilla": r(sheet_repo),
+        "planilla_n": int(row["sheet_repo_n"] or 0),
+        "fudo": r(fudo_api),
+        "fudo_n": int(row["fudo_n"] or 0),
+        "diferencia_fudo_planilla": diff_fudo_planilla,
+        "sheet_externos": r(sheet_ext_var),
+        "sheet_externos_n": int(row["sheet_ext_var_n"] or 0),
+        "sheet_fijos": r(sheet_fijos),
+        "sheet_fijos_n": int(row["sheet_fijos_n"] or 0),
+        "fuente": fuente,
     }
 
 
@@ -166,11 +268,20 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
     top = _top_category(conn, venue_id, d0, d1)
     ext = _external_totals(conn, venue_id, d0, d1)
     prev_ext = _external_totals(conn, venue_id, p0, p1)
-    gastos_total = r(exp["total"] + ext["excepcional"] + ext["fijo"])
-    prev_gastos_total = r(prev_exp["total"] + prev_ext["excepcional"] + prev_ext["fijo"])
+
+    gastos_externos_tot = r(exp["sheet_externos"] + ext["excepcional"])
+    gastos_fijos_tot = r(exp["sheet_fijos"] + (ext["fijo"] if exp["sheet_fijos"] == 0 else 0.0))
+    gastos_total = r(exp["total"] + gastos_externos_tot + gastos_fijos_tot)
+
+    prev_externos_tot = r(prev_exp["sheet_externos"] + prev_ext["excepcional"])
+    prev_fijos_tot = r(prev_exp["sheet_fijos"] + (prev_ext["fijo"] if prev_exp["sheet_fijos"] == 0 else 0.0))
+    prev_gastos_total = r(prev_exp["total"] + prev_externos_tot + prev_fijos_tot)
 
     def pct(a, b):
         return r((a - b) / b * 100, 1) if b else None
+
+    resultado_neto = r(cur["ganancia"] - gastos_total)
+    margen_bruto_pct = r(100.0 - cur["cmv_pct"], 1) if cur["ventas_menu"] else 0.0
 
     return {
         "periodo": {"desde": d0.isoformat(), "hasta": d1.isoformat(), "etiqueta": label_period(d0, d1),
@@ -178,17 +289,42 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
         "anterior": {"desde": p0.isoformat(), "hasta": p1.isoformat(), "etiqueta": label_period(p0, p1)},
         "kpis": {
             "ventas": cur["ventas"],
-            "ventas_menu": cur["ventas_menu"],
+            "ventas_salon": cur["ventas_salon"],
             "ventas_delivery": cur["ventas_delivery"],
+            "ventas_delivery_propio": cur["ventas_delivery_propio"],
+            "ventas_delivery_apps": cur["ventas_delivery_apps"],
+            "ventas_menu": cur["ventas_menu"],
+            "salon_pct": cur["salon_pct"],
+            "delivery_pct": cur["delivery_pct"],
+            "efectivo": cur["efectivo"],
+            "virtual": cur["virtual"],
+            "efectivo_pct": cur["efectivo_pct"],
+            "virtual_pct": cur["virtual_pct"],
+            "medios_pago": cur["medios_pago"],
             "gastos": gastos_total,
             "gastos_fudo": exp["total"],
+            "gastos_fudo_api": exp["fudo"],
+            "gastos_planilla_contable": exp["planilla"],
+            "gastos_fudo_dif": exp["diferencia_fudo_planilla"],
             "gastos_fudo_fuente": exp["fuente"],
-            "gastos_externos": ext["excepcional"],
-            "gastos_fijos": ext["fijo"],
-            "resultado": r(cur["ganancia"] - gastos_total),
+            "gastos_externos": gastos_externos_tot,
+            "gastos_fijos": gastos_fijos_tot,
+            "resultado": resultado_neto,
             "cmv": cur["cmv"],
             "cmv_pct": cur["cmv_pct"],
+            "margen_bruto_pct": margen_bruto_pct,
             "ganancia": cur["ganancia"],
+            "ecuacion_ganancia": {
+                "formula": "Ganancia Bruta = Ventas Costeadas (Carta) − Costo de Mercadería Vendida (CMV)",
+                "ventas_totales": cur["ventas"],
+                "ventas_costeadas": cur["ventas_menu"],
+                "cmv": cur["cmv"],
+                "cmv_pct": cur["cmv_pct"],
+                "ganancia_bruta": cur["ganancia"],
+                "margen_bruto_pct": margen_bruto_pct,
+                "gastos_totales": gastos_total,
+                "resultado_neto": resultado_neto,
+            },
             "ticket": cur["ticket"],
             "ventas_n": cur["ventas_n"],
             "top_categoria": top,
@@ -196,13 +332,14 @@ def summary(conn, venue_id: int, d0: date, d1: date) -> dict:
         "gastos_detalle": exp,
         "comparacion": {
             "ventas_pct": pct(cur["ventas"], prev["ventas"]),
-            "ventas_menu_pct": pct(cur["ventas_menu"], prev["ventas_menu"]),
+            "ventas_menu_pct": pct(cur["ventas_salon"], prev["ventas_salon"]),
             "delivery_pct": pct(cur["ventas_delivery"], prev["ventas_delivery"]),
             "gastos_pct": pct(gastos_total, prev_gastos_total),
             "ganancia_pct": pct(cur["ganancia"], prev["ganancia"]),
             "cmv_pp": r(cur["cmv_pct"] - prev["cmv_pct"], 1),
             "anterior": {
                 "ventas": prev["ventas"],
+                "ventas_salon": prev["ventas_salon"],
                 "ventas_menu": prev["ventas_menu"],
                 "ventas_delivery": prev["ventas_delivery"],
                 "gastos": prev_gastos_total,
@@ -307,8 +444,11 @@ def daily(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
     rows = conn.execute(
         """
         SELECT s.business_date AS fecha,
-               SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_total ELSE 0 END) AS menu,
-               SUM(CASE WHEN s.channel  = 'delivery' THEN si.line_total ELSE 0 END) AS delivery,
+               SUM(CASE WHEN s.channel = 'salon' THEN si.line_total ELSE 0 END) AS salon,
+               SUM(CASE WHEN s.channel IN ('delivery', 'takeaway') THEN si.line_total ELSE 0 END) AS delivery,
+               SUM(CASE WHEN s.channel = 'takeaway' THEN si.line_total ELSE 0 END) AS delivery_propio,
+               SUM(CASE WHEN s.channel = 'delivery' THEN si.line_total ELSE 0 END) AS delivery_apps,
+               SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_total ELSE 0 END) AS costeadas,
                SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_cost ELSE 0 END) AS cmv
           FROM sales s
           JOIN sale_items si ON si.sale_id = s.id
@@ -324,46 +464,246 @@ def daily(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
     while d <= d1:
         row = by_date.get(d)
         if row:
-            m, dl, c = f(row["menu"]), f(row["delivery"]), f(row["cmv"])
-            out.append({"fecha": d.isoformat(), "menu": r(m), "delivery": r(dl), "total": r(m + dl),
-                        "cmv_pct": r(c / m * 100, 1) if m else 0})
+            sal = f(row["salon"])
+            dl = f(row["delivery"])
+            cost_v = f(row["costeadas"])
+            c = f(row["cmv"])
+            out.append({
+                "fecha": d.isoformat(),
+                "salon": r(sal),
+                "menu": r(sal),
+                "delivery": r(dl),
+                "delivery_propio": r(row["delivery_propio"]),
+                "delivery_apps": r(row["delivery_apps"]),
+                "total": r(sal + dl),
+                "cmv_pct": r(c / cost_v * 100, 1) if cost_v else 0,
+            })
         else:
-            out.append({"fecha": d.isoformat(), "menu": 0, "delivery": 0, "total": 0, "cmv_pct": 0})
+            out.append({
+                "fecha": d.isoformat(),
+                "salon": 0,
+                "menu": 0,
+                "delivery": 0,
+                "delivery_propio": 0,
+                "delivery_apps": 0,
+                "total": 0,
+                "cmv_pct": 0,
+            })
         d += timedelta(days=1)
+    return out
+
+
+def _reconcile_providers(conn, venue_id: int, d0: date, d1: date) -> list[dict]:
+    """Cruza proveedores entre Planilla (Reposiciones) y Fudo API en el período."""
+    fudo_rows = conn.execute(
+        """
+        SELECT COALESCE(p.name, NULLIF(e.description, ''), 'Sin proveedor') AS prov,
+               COUNT(*) AS n, SUM(e.amount) AS total
+          FROM expenses e
+          LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.venue_id = %s AND e.source = 'fudo' AND e.expense_date BETWEEN %s AND %s
+         GROUP BY 1
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    sheet_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(e.description, ''), NULLIF(e.payload->>'subcategoria', ''), 'Sin proveedor') AS prov,
+               COUNT(*) AS n, SUM(e.amount) AS total
+          FROM expenses e
+         WHERE e.venue_id = %s AND e.source = 'sheet'
+           AND LOWER(COALESCE(e.category_name, '')) LIKE 'reposic%%'
+           AND e.expense_date BETWEEN %s AND %s
+         GROUP BY 1
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+
+    by_key: dict[str, dict] = {}
+    for x in sheet_rows:
+        raw_name = str(x["prov"] or "Sin proveedor").strip()
+        k = _norm_provider(raw_name) or norm(raw_name)
+        entry = by_key.setdefault(k, {"proveedor": raw_name, "planilla": 0.0, "planilla_n": 0, "fudo": 0.0, "fudo_n": 0})
+        entry["planilla"] += f(x["total"])
+        entry["planilla_n"] += int(x["n"] or 0)
+    for x in fudo_rows:
+        raw_name = str(x["prov"] or "Sin proveedor").strip()
+        k = _norm_provider(raw_name) or norm(raw_name)
+        entry = by_key.setdefault(k, {"proveedor": raw_name, "planilla": 0.0, "planilla_n": 0, "fudo": 0.0, "fudo_n": 0})
+        # Preferir el nombre con espacios/acentos más legible
+        if " " in raw_name and " " not in entry["proveedor"]:
+            entry["proveedor"] = raw_name
+        entry["fudo"] += f(x["total"])
+        entry["fudo_n"] += int(x["n"] or 0)
+
+    out = []
+    for entry in by_key.values():
+        dif = entry["planilla"] - entry["fudo"]
+        out.append({
+            "proveedor": entry["proveedor"],
+            "planilla": r(entry["planilla"]),
+            "planilla_n": entry["planilla_n"],
+            "fudo": r(entry["fudo"]),
+            "fudo_n": entry["fudo_n"],
+            "diferencia": r(dif),
+            "abs_dif": abs(dif),
+        })
+    out.sort(key=lambda x: (-x["abs_dif"], -x["planilla"]))
     return out
 
 
 def expenses_detail(conn, venue_id: int, d0: date, d1: date) -> dict:
     exp = _expenses(conn, venue_id, d0, d1)
-    rows = conn.execute(
+    ext = _external_totals(conn, venue_id, d0, d1)
+
+    # Categorías de Fudo API
+    fudo_cat_rows = conn.execute(
         """
-        SELECT COALESCE(category_name, 'Sin categoría') AS categoria,
+        SELECT COALESCE(NULLIF(category_name, ''), 'Compras y proveedores') AS categoria,
                SUM(amount) AS total, COUNT(*) AS n
           FROM expenses
-         WHERE venue_id = %s AND expense_date BETWEEN %s AND %s
-           AND source = (SELECT source FROM expenses WHERE venue_id = %s AND expense_date BETWEEN %s AND %s
-                         ORDER BY CASE source WHEN 'sheet' THEN 1 WHEN 'fudo' THEN 2 ELSE 3 END LIMIT 1)
+         WHERE venue_id = %s AND source = 'fudo' AND expense_date BETWEEN %s AND %s
          GROUP BY 1 ORDER BY 2 DESC
         """,
-        (venue_id, d0, d1, venue_id, d0, d1),
+        (venue_id, d0, d1),
     ).fetchall()
-    total = sum(f(x["total"]) for x in rows) or 1
+    fudo_cat_tot = sum(f(x["total"]) for x in fudo_cat_rows) or 1.0
+
+    # Categorías Externas (Planilla Gestión sin Reposición - Variables)
+    ext_cat_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(category_name, ''), 'Otros externos') AS categoria,
+               SUM(amount) AS total, COUNT(*) AS n
+          FROM expenses
+         WHERE venue_id = %s AND source = 'sheet'
+           AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+           AND LOWER(COALESCE(payload->>'tipo', 'variable')) <> 'fijo'
+           AND expense_date BETWEEN %s AND %s
+         GROUP BY 1 ORDER BY 2 DESC
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    ext_cat_tot = (sum(f(x["total"]) for x in ext_cat_rows) + ext["excepcional"]) or 1.0
+    categorias_externos = [
+        {"categoria": x["categoria"], "total": r(x["total"]), "n": int(x["n"]),
+         "participacion": r(f(x["total"]) / ext_cat_tot * 100, 1)}
+        for x in ext_cat_rows
+    ]
+    if ext["excepcional"] > 0:
+        categorias_externos.append({
+            "categoria": "Cargados en el portal",
+            "total": r(ext["excepcional"]),
+            "n": 1,
+            "participacion": r(ext["excepcional"] / ext_cat_tot * 100, 1),
+        })
+
+    # Categorías Fijos (Planilla Gestión - Fijos)
+    fijos_cat_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(category_name, ''), 'Fijos') AS categoria,
+               SUM(amount) AS total, COUNT(*) AS n
+          FROM expenses
+         WHERE venue_id = %s AND source = 'sheet'
+           AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+           AND LOWER(COALESCE(payload->>'tipo', '')) = 'fijo'
+           AND expense_date BETWEEN %s AND %s
+         GROUP BY 1 ORDER BY 2 DESC
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    fijos_cat_tot = sum(f(x["total"]) for x in fijos_cat_rows) or 1.0
+    categorias_fijos = [
+        {"categoria": x["categoria"], "total": r(x["total"]), "n": int(x["n"]),
+         "participacion": r(f(x["total"]) / fijos_cat_tot * 100, 1)}
+        for x in fijos_cat_rows
+    ]
+
+    # Movimientos detallados (todos los gastos del período para visualización y descripción)
+    mov_rows = conn.execute(
+        """
+        SELECT e.id, e.expense_date, e.source, e.amount,
+               COALESCE(NULLIF(e.category_name, ''), 'Sin categoría') AS categoria,
+               COALESCE(NULLIF(e.payload->>'subcategoria', ''), p.name, '') AS subcategoria,
+               COALESCE(NULLIF(e.description, ''), p.name, '') AS descripcion,
+               COALESCE(e.payload->>'tipo', 'Variable') AS tipo
+          FROM expenses e
+          LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.venue_id = %s AND e.expense_date BETWEEN %s AND %s
+         ORDER BY e.expense_date DESC, e.amount DESC
+         LIMIT 350
+        """,
+        (venue_id, d0, d1),
+    ).fetchall()
+    movimientos = []
+    for m in mov_rows:
+        src = m["source"]
+        cat = str(m["categoria"] or "")
+        tipo = str(m["tipo"] or "Variable")
+        if src == "fudo":
+            grupo = "fudo"
+            origen_lbl = "Fudo API"
+        elif cat.lower().startswith("reposic"):
+            grupo = "reposicion"
+            origen_lbl = "Planilla (Reposición)"
+        elif tipo.lower() == "fijo":
+            grupo = "fijo"
+            origen_lbl = "Planilla (Gasto Fijo)"
+        else:
+            grupo = "externo"
+            origen_lbl = "Planilla (Gasto Externo)"
+        movimientos.append({
+            "id": m["id"],
+            "fecha": m["expense_date"].isoformat(),
+            "origen": origen_lbl,
+            "grupo": grupo,
+            "tipo": tipo,
+            "categoria": cat,
+            "subcategoria": m["subcategoria"] or "",
+            "descripcion": m["descripcion"] or "",
+            "monto": r(m["amount"]),
+        })
+
+    # Estado de la planilla contable en settings
+    contable_setting = None
+    try:
+        srow = conn.execute(
+            "SELECT value FROM settings WHERE venue_id = %s AND key = 'contable_sheet'",
+            (venue_id,),
+        ).fetchone()
+        if srow and srow["value"]:
+            contable_setting = srow["value"]
+    except Exception:  # noqa: BLE001
+        pass
+
+    reconciliacion = _reconcile_providers(conn, venue_id, d0, d1)
+    gastos_externos_tot = r(exp["sheet_externos"] + ext["excepcional"])
+    gastos_fijos_tot = r(exp["sheet_fijos"] + (ext["fijo"] if exp["sheet_fijos"] == 0 else 0.0))
+    gastos_totales = r(exp["total"] + gastos_externos_tot + gastos_fijos_tot)
+
     return {
         **exp,
+        "gastos_totales": gastos_totales,
+        "gastos_externos_total": gastos_externos_tot,
+        "gastos_fijos_total": gastos_fijos_tot,
         "categorias": [
             {"categoria": x["categoria"], "total": r(x["total"]), "n": int(x["n"]),
-             "participacion": r(f(x["total"]) / total * 100, 1)}
-            for x in rows
+             "participacion": r(f(x["total"]) / fudo_cat_tot * 100, 1)}
+            for x in fudo_cat_rows
         ],
+        "categorias_externos": categorias_externos,
+        "categorias_fijos": categorias_fijos,
+        "reconciliacion_proveedores": reconciliacion[:25],
+        "contable_sheet": contable_setting,
+        "movimientos": movimientos,
     }
 
 
 # ------------------------------------------------------------------ revisión
 
 
-def _finding(id_, nivel, tipo, titulo, detalle, accion, items=None, peso=0.0) -> dict:
+def _finding(id_, nivel, tipo, titulo, detalle, accion, items=None, peso=0.0, seccion="dashboard") -> dict:
     return {"id": id_, "nivel": nivel, "tipo": tipo, "titulo": titulo, "detalle": detalle,
-            "accion": accion, "items": items or [], "peso": r(peso, 1)}
+            "accion": accion, "items": items or [], "peso": r(peso, 1), "seccion": seccion}
 
 
 def _plural(n: int, singular: str, plural: str) -> str:
@@ -381,7 +721,56 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
     exp_cur = _expenses(conn, venue_id, d0, d1)
     exp_prev = _expenses(conn, venue_id, p0, p1)
 
-    # 1. productos de menú vendidos sin costo
+    # 1. Diferencia entre Gastos Fudo (API) y Planilla Contable / Reposiciones
+    if exp_cur["planilla"] > 0 or exp_cur["fudo"] > 0:
+        diff_fp = exp_cur["planilla"] - exp_cur["fudo"]
+        if abs(diff_fp) > 5000:
+            reconc = _reconcile_providers(conn, venue_id, d0, d1)
+            top_diffs = [
+                f"{p['proveedor']} · Planilla ${p['planilla']:,.0f} ({p['planilla_n']}) vs Fudo ${p['fudo']:,.0f} ({p['fudo_n']}) → Dif. ${p['diferencia']:+,.0f}"
+                for p in reconc[:10]
+                if p["abs_dif"] > 1000
+            ]
+            nivel_fp = "critico" if abs(diff_fp) > 1_000_000 else "atencion"
+            target_list = critico if nivel_fp == "critico" else atencion
+            target_list.append(
+                _finding(
+                    "diff-fudo-planilla",
+                    nivel_fp,
+                    "gastos",
+                    "Diferencia entre Gastos Fudo y Planilla Contable / Reposición",
+                    f"En el período: Planilla (Reposiciones) registra ${exp_cur['planilla']:,.0f} ({exp_cur['planilla_n']} movs) "
+                    f"y Fudo API registra ${exp_cur['fudo']:,.0f} ({exp_cur['fudo_n']} movs) · Diferencia: ${diff_fp:+,.0f}.",
+                    "Revisar comprobantes de proveedores pendientes de carga en Fudo o en la Planilla.",
+                    top_diffs,
+                    peso=abs(diff_fp),
+                    seccion="gastos",
+                )
+            )
+
+    # 1b. Estado de acceso a la Planilla Contable
+    try:
+        srow = conn.execute(
+            "SELECT value FROM settings WHERE venue_id = %s AND key = 'contable_sheet'",
+            (venue_id,),
+        ).fetchone()
+        if srow and isinstance(srow["value"], dict) and srow["value"].get("status") == "needs_access":
+            atencion.append(
+                _finding(
+                    "contable-acceso",
+                    "atencion",
+                    "gastos",
+                    "Planilla Contable con acceso restringido en Google Drive",
+                    "El archivo contable compartido aún requiere permiso de lectura pública. "
+                    "Actualmente se corroboran los Gastos de Fudo contra la categoría 'Reposiciones' de la Planilla Gestión.",
+                    "En Google Drive → Compartir Planilla Contable → 'Cualquier persona con el enlace (Lector)' y tocar Sincronizar.",
+                    seccion="gastos",
+                )
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. productos de menú vendidos sin costo
     rows = conn.execute(
         """
         SELECT p.name AS producto, SUM(si.line_total) AS ventas, SUM(si.quantity) AS cantidad
@@ -405,14 +794,15 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
             _finding(
                 "sin-costeo", "critico", "costos",
                 f"{_plural(len(rows), 'producto sin costo', 'productos sin costo')}",
-                f"Se vendieron ${pes:,.0f} sin costo cargado ({share:.1f} % de las ventas de menú).",
+                f"Se vendieron ${pes:,.0f} sin costo cargado ({share:.1f} % de las ventas de carta).",
                 "Cargar la receta o el costo en Fudo (o un costo de respaldo).",
                 [f"{x['producto']} · ${f(x['ventas']):,.0f} ({f(x['cantidad']):.0f} u.)" for x in rows],
                 share,
+                seccion="ganancias",
             )
         )
 
-    # 2. gastos duplicados
+    # 3. gastos duplicados
     rows = conn.execute(
         """
         SELECT expense_date, amount, COUNT(*) AS n, MIN(description) AS d
@@ -430,11 +820,12 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 f"{_plural(len(rows), 'posible gasto duplicado', 'posibles gastos duplicados')}",
                 "Mismo día e importe repetido. Puede ser un duplicado real o dos compras iguales.",
                 "Revisar en la planilla y borrar el duplicado.",
-                [f"{x['expense_date']} · ${f(x['amount']):,.0f} · {x['n']} veces" for x in rows],
+                [f"{x['expense_date']} · ${f(x['amount']):,.0f} · {x['n']} veces ({x['d'] or ''})" for x in rows],
+                seccion="gastos",
             )
         )
 
-    # 3. cierre mensual vs ventas
+    # 4. cierre mensual vs ventas
     month_start = d1.replace(day=1)
     month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
     close = conn.execute(
@@ -449,14 +840,15 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
             critico.append(
                 _finding(
                     "cierre", "critico", "cierres",
-                    "El cierre mensual no coincide con las ventas",
-                    f"Cierre cargado ${float(close['ventas']):,.0f} · ventas del sistema "
+                    "El cierre mensual de la planilla no coincide con las ventas reales",
+                    f"Cierre en planilla ${float(close['ventas']):,.0f} · ventas en Fudo "
                     f"${month_tot['ventas']:,.0f} ({pct:+.1f} %).",
-                    "Revisar el cierre o la importación de ventas del mes.",
+                    "Actualizar la pestaña de cierre mensual en la planilla con el total de Fudo.",
+                    seccion="ventas",
                 )
             )
 
-    # 4. caída de ventas
+    # 5. caída de ventas
     if prev["ventas"] and cur["ventas"] < prev["ventas"] * 0.85:
         pct = (cur["ventas"] - prev["ventas"]) / prev["ventas"] * 100
         critico.append(
@@ -466,24 +858,26 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 f"${cur['ventas']:,.0f} contra ${prev['ventas']:,.0f} del período anterior.",
                 "Revisar días flojos, faltantes de stock o cambios de carta.",
                 peso=pct,
+                seccion="ventas",
             )
         )
 
-    # 5. caída de gastos (sospechosa)
+    # 6. caída de gastos (sospechosa)
     if exp_prev["total"] and exp_cur["total"] < exp_prev["total"] * 0.7:
         pct = (exp_cur["total"] - exp_prev["total"]) / exp_prev["total"] * 100
         atencion.append(
             _finding(
                 "gastos-caen", "atencion", "gastos",
-                f"Los gastos cayeron {abs(pct):.0f} %",
+                f"Los gastos registrados cayeron {abs(pct):.0f} %",
                 f"${exp_cur['total']:,.0f} contra ${exp_prev['total']:,.0f} del período anterior. "
                 "Una caída así suele ser un gasto sin cargar, no un ahorro.",
                 "Revisar alquiler, sueldos, servicios y proveedores fijos del período.",
                 peso=pct,
+                seccion="gastos",
             )
         )
 
-    # 6. CMV por categoría sobre el objetivo
+    # 7. CMV por categoría sobre el objetivo
     cats = categories(conn, venue_id, d0, d1)
     sobre = [c for c in cats if c["objetivo"] and c["estado_cmv"] == "sobre" and c["ventas"] > 1000]
     if sobre:
@@ -495,10 +889,11 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 "Revisar precios de venta o costos de receta.",
                 [f"{c['categoria']} · CMV {c['cmv_pct']:.1f} % (objetivo {c['objetivo']['min']:.0f}–{c['objetivo']['max']:.0f} %)"
                  for c in sobre],
+                seccion="ganancias",
             )
         )
 
-    # 6. aumentos de insumos
+    # 8. aumentos de insumos
     rows = conn.execute(
         """
         WITH x AS (
@@ -529,10 +924,11 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 "Actualizar precios de venta o buscar alternativa de proveedor.",
                 [f"{x['insumo']} · ${f(x['primero']):,.0f} → ${f(x['ultimo']):,.0f} "
                  f"({(f(x['ultimo'])/f(x['primero'])-1)*100:+.0f} %)" for x in rows],
+                seccion="gastos",
             )
         )
 
-    # 7. categorías que caen
+    # 9. categorías que caen
     caen = [c for c in cats if c["delta_pct"] is not None and c["delta_pct"] < -15 and c["ventas"] > 2000]
     if caen:
         atencion.append(
@@ -542,10 +938,11 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 "Comparado con el período anterior equivalente.",
                 "Revisar surtido, precios o visibilidad de esas categorías.",
                 [f"{c['categoria']} · ${c['ventas']:,.0f} ({c['delta_pct']:+.0f} %)" for c in caen],
+                seccion="ventas",
             )
         )
 
-    # 8. categorías que suben (info)
+    # 10. categorías que suben (info)
     suben = [c for c in cats if c["delta_pct"] is not None and c["delta_pct"] > 10 and c["ventas"] > 2000]
     if suben:
         info.append(
@@ -555,18 +952,20 @@ def review(conn, venue_id: int, d0: date, d1: date) -> dict:
                 "Buen desempeño contra el período anterior.",
                 "Mantener el surtido y revisar si conviene ampliar.",
                 [f"{c['categoria']} · ${c['ventas']:,.0f} ({c['delta_pct']:+.0f} %)" for c in suben],
+                seccion="ventas",
             )
         )
 
-    # 10. delivery como dato informativo (sin costo)
+    # 11. participación de canales (delivery vs salón)
     if cur["ventas_delivery"]:
-        share = cur["ventas_delivery"] / cur["ventas"] * 100 if cur["ventas"] else 0
         info.append(
             _finding(
                 "canal-delivery", "info", "canal",
-                f"Delivery: {share:.0f} % de las ventas",
-                f"${cur['ventas_delivery']:,.0f} por apps, sin costo de mercadería asignado.",
-                "Cuando estén ordenados los productos comodín, el canal se costea solo.",
+                f"Delivery y Take Away: {cur['delivery_pct']:.1f} % de las ventas vs Salón {cur['salon_pct']:.1f} %",
+                f"Fuera de salón ${cur['ventas_delivery']:,.0f} (Delivery propio/Mostrador ${cur['ventas_delivery_propio']:,.0f} "
+                f"+ Apps ${cur['ventas_delivery_apps']:,.0f}) · Salón ${cur['ventas_salon']:,.0f}.",
+                "Ver desglose completo de canales y medios de pago en la sección Ventas.",
+                seccion="ventas",
             )
         )
 
@@ -826,36 +1225,54 @@ def progress(conn, venue_id: int, d0: date, d1: date) -> dict | None:
 
 
 def expenses_cross(conn, venue_id: int, months: int = 6) -> list[dict]:
-    """Por mes: gastos de Fudo vs. los de la planilla, más los externos cargados en GesT."""
+    """Por mes: gastos de Fudo vs. Reposiciones de Planilla Contable/Gestión, más Externos y Fijos."""
     today = today_ar()
     first = today.replace(day=1)
     for _ in range(months - 1):
         first = (first - timedelta(days=1)).replace(day=1)
     rows = conn.execute(
         """
-        SELECT to_char(expense_date, 'YYYY-MM') AS m, source, SUM(amount) AS t
+        SELECT to_char(expense_date, 'YYYY-MM') AS m,
+               COALESCE(SUM(CASE WHEN source = 'fudo' THEN amount ELSE 0 END), 0) AS fudo,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) LIKE 'reposic%%'
+                                 THEN amount ELSE 0 END), 0) AS planilla_repo,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', 'variable')) <> 'fijo'
+                                 THEN amount ELSE 0 END), 0) AS sheet_ext,
+               COALESCE(SUM(CASE WHEN source = 'sheet' AND LOWER(COALESCE(category_name, '')) NOT LIKE 'reposic%%'
+                                  AND LOWER(COALESCE(payload->>'tipo', '')) = 'fijo'
+                                 THEN amount ELSE 0 END), 0) AS sheet_fijos
           FROM expenses
          WHERE venue_id = %s AND source IN ('fudo', 'sheet') AND expense_date >= %s
-         GROUP BY 1, 2
+         GROUP BY 1
         """,
         (venue_id, first),
     ).fetchall()
-    by = {(x["m"], x["source"]): f(x["t"]) for x in rows}
+    by_m = {x["m"]: x for x in rows}
     out = []
     cursor = today.replace(day=1)
     for _ in range(months):
         key = cursor.strftime("%Y-%m")
         end = min(today, cursor.replace(day=calendar.monthrange(cursor.year, cursor.month)[1]))
         ext = _external_totals(conn, venue_id, cursor, end)
-        fudo, sheet = by.get((key, "fudo"), 0.0), by.get((key, "sheet"), 0.0)
+        row = by_m.get(key) or {}
+        fudo = f(row.get("fudo"))
+        sheet_repo = f(row.get("planilla_repo"))
+        sheet_ext = f(row.get("sheet_ext"))
+        sheet_fijos = f(row.get("sheet_fijos"))
+        externos_tot = sheet_ext + ext["excepcional"]
+        fijos_tot = sheet_fijos + (ext["fijo"] if sheet_fijos == 0 else 0.0)
+        base_fudo = max(sheet_repo, fudo) if sheet_repo > 0 else fudo
         out.append(
             {
                 "mes": key,
                 "etiqueta": f"{MESES[cursor.month - 1].capitalize()} {cursor.year}",
                 "fudo": r(fudo),
-                "planilla": r(sheet),
-                "diferencia": r(sheet - fudo) if fudo and sheet else None,
-                "externos": r(ext["excepcional"] + ext["fijo"]),
+                "planilla": r(sheet_repo),
+                "diferencia": r(sheet_repo - fudo) if (fudo or sheet_repo) else None,
+                "externos": r(externos_tot),
+                "fijos": r(fijos_tot),
+                "total": r(base_fudo + externos_tot + fijos_tot),
             }
         )
         cursor = (cursor - timedelta(days=1)).replace(day=1)
@@ -950,6 +1367,14 @@ def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
             except Exception as exc:  # noqa: BLE001
                 pg.rollback()
                 gastos = {"status": "error", "error": str(exc)}
+            planillas = {}
+            if hasattr(_ingest, "sync_sheets"):
+                try:
+                    planillas = _ingest.sync_sheets(pg, vid)
+                    pg.commit()
+                except Exception as exc:  # noqa: BLE001
+                    pg.rollback()
+                    planillas = {"status": "error", "error": str(exc)}
             agregados = _recompute.recompute(pg, vid)
             pg.commit()
         return {
@@ -958,6 +1383,7 @@ def sync_fudo_live(payload: dict | None = None, days: int = 10) -> dict:
                 "rango": f"{d0.isoformat()} → {d1.isoformat()}",
                 "ventas": ventas,
                 "gastos": gastos,
+                "planillas": planillas,
                 "agregados": agregados,
             },
         }

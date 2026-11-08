@@ -12,25 +12,26 @@ const STARTED_AT = new Date().toISOString();
 let cachedVersionFull = "";
 
 export function detectVersion(): { full: string; short: string } {
+  if (cachedVersionFull) {
+    return { full: cachedVersionFull, short: cachedVersionFull.slice(0, 7) };
+  }
   const envCommit = (process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || "").trim();
   if (envCommit) {
     cachedVersionFull = envCommit;
     return { full: envCommit, short: envCommit.slice(0, 7) };
   }
-  if (!cachedVersionFull) {
-    try {
-      cachedVersionFull = execSync("git rev-parse HEAD", {
-        encoding: "utf-8",
-        timeout: 3000,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-    } catch {
-      cachedVersionFull = "";
-    }
+  try {
+    cachedVersionFull = execSync("git rev-parse HEAD", {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    cachedVersionFull = "";
   }
   return {
     full: cachedVersionFull,
-    short: cachedVersionFull ? cachedVersionFull.slice(0, 7) : "desconocida",
+    short: cachedVersionFull ? cachedVersionFull.slice(0, 7) : "next-15",
   };
 }
 

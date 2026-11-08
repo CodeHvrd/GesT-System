@@ -84,13 +84,26 @@ export async function externalTotals(dFrom: string, dTo: string) {
   if (hasPostgresUrl()) {
     try {
       rows = await pgQueryAll(
-        `SELECT * FROM external_expenses
-         WHERE (fecha IS NOT NULL AND fecha::text BETWEEN $1 AND $2)
-            OR (es_fijo = TRUE AND (mes_key = '' OR mes_key BETWEEN $3 AND $4))`,
-        [dFrom, dTo, mFrom, mTo]
+        `SELECT id, expense_date::text AS fecha, '' AS mes_key,
+                CASE WHEN kind = 'fijo' THEN 'Fijo' ELSE 'Excepcional' END AS categoria,
+                name AS proveedor, COALESCE(frequency, '') AS descripcion,
+                amount::float AS monto, (kind = 'fijo') AS es_fijo
+         FROM external_expenses
+         WHERE (kind = 'excepcional' AND expense_date BETWEEN $1::date AND $2::date)
+            OR (kind = 'fijo' AND (end_date IS NULL OR end_date >= $1::date))`,
+        [dFrom, dTo]
       );
     } catch {
-      rows = [];
+      try {
+        rows = await pgQueryAll(
+          `SELECT * FROM external_expenses
+           WHERE (fecha IS NOT NULL AND fecha::text BETWEEN $1 AND $2)
+              OR (es_fijo = TRUE AND (mes_key = '' OR mes_key BETWEEN $3 AND $4))`,
+          [dFrom, dTo, mFrom, mTo]
+        );
+      } catch {
+        rows = [];
+      }
     }
   } else {
     rows = queryAll(
@@ -142,15 +155,24 @@ export async function externalList(dFrom?: string, dTo?: string) {
     try {
       if (dFrom && dTo) {
         rows = await pgQueryAll(
-          `SELECT * FROM external_expenses
-           WHERE (fecha IS NOT NULL AND fecha::text BETWEEN $1 AND $2)
-              OR es_fijo = TRUE
+          `SELECT id, expense_date::text AS fecha, '' AS mes_key,
+                  CASE WHEN kind = 'fijo' THEN 'Fijo' ELSE 'Excepcional' END AS categoria,
+                  name AS proveedor, COALESCE(frequency, '') AS descripcion,
+                  amount::float AS monto, (kind = 'fijo') AS es_fijo, created_at::text AS creado_en
+           FROM external_expenses
+           WHERE (kind = 'excepcional' AND expense_date BETWEEN $1::date AND $2::date)
+              OR (kind = 'fijo' AND (end_date IS NULL OR end_date >= $1::date))
            ORDER BY id DESC`,
           [dFrom, dTo]
         );
       } else {
         rows = await pgQueryAll(
-          "SELECT * FROM external_expenses ORDER BY id DESC LIMIT 200"
+          `SELECT id, expense_date::text AS fecha, '' AS mes_key,
+                  CASE WHEN kind = 'fijo' THEN 'Fijo' ELSE 'Excepcional' END AS categoria,
+                  name AS proveedor, COALESCE(frequency, '') AS descripcion,
+                  amount::float AS monto, (kind = 'fijo') AS es_fijo, created_at::text AS creado_en
+           FROM external_expenses
+           ORDER BY id DESC LIMIT 200`
         );
       }
     } catch {
@@ -189,33 +211,55 @@ export async function externalAdd(payload: Record<string, unknown>) {
   const fecha = parseDate(payload.fecha) || todayAr();
   const mesKey = norm(payload.mes_key) || fecha.slice(0, 7);
   const categoria = norm(payload.categoria) || "Gasto Externo";
-  const proveedor = norm(payload.proveedor);
+  const proveedor = norm(payload.proveedor || payload.nombre);
   const descripcion = norm(payload.descripcion);
   const monto = parseNumber(payload.monto);
-  const esFijo = Boolean(payload.es_fijo);
+  const esFijo = Boolean(payload.es_fijo || payload.tipo === "fijo");
 
   if (monto <= 0) {
     return { ok: false, error: "El monto debe ser mayor a 0." };
   }
 
   if (hasPostgresUrl()) {
-    const row = await pgQueryOne<{ id: number }>(
-      `INSERT INTO external_expenses (
-        fecha, mes_key, categoria, categoria_key, proveedor, proveedor_key, descripcion, monto, es_fijo
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-      [
-        fecha,
-        mesKey,
-        categoria,
-        normKey(categoria),
-        proveedor,
-        normProvider(proveedor),
-        descripcion,
-        monto,
-        esFijo,
-      ]
-    );
-    return { ok: true, id: row?.id || 0 };
+    try {
+      const venueRow = await pgQueryOne<{ id: number }>(
+        "SELECT id FROM venues ORDER BY id ASC LIMIT 1"
+      );
+      const vid = venueRow?.id || 1;
+      const nameLabel = [proveedor, descripcion, categoria].filter(Boolean).join(" · ").slice(0, 80) || "Gasto Externo";
+      const row = await pgQueryOne<{ id: number }>(
+        `INSERT INTO external_expenses (
+          venue_id, kind, name, amount, expense_date, frequency, start_date
+        ) VALUES ($1, $2, $3, $4, $5::date, $6, $5::date) RETURNING id`,
+        [
+          vid,
+          esFijo ? "fijo" : "excepcional",
+          nameLabel,
+          monto,
+          fecha,
+          esFijo ? "mensual" : null,
+        ]
+      );
+      return { ok: true, id: row?.id || 0 };
+    } catch {
+      const row = await pgQueryOne<{ id: number }>(
+        `INSERT INTO external_expenses (
+          fecha, mes_key, categoria, categoria_key, proveedor, proveedor_key, descripcion, monto, es_fijo
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [
+          fecha,
+          mesKey,
+          categoria,
+          normKey(categoria),
+          proveedor,
+          normProvider(proveedor),
+          descripcion,
+          monto,
+          esFijo,
+        ]
+      );
+      return { ok: true, id: row?.id || 0 };
+    }
   }
 
   const res = executeSql(
@@ -278,42 +322,34 @@ async function queryPeriodMetrics(
   if (hasPostgresUrl()) {
     try {
       const chRows = await pgQueryAll<Record<string, unknown>>(
-        `SELECT canal,
-                SUM(ventas_brutas) AS vb,
-                SUM(descuentos) AS desc,
-                SUM(ventas_netas) AS vn,
-                SUM(cmv) AS cmv,
-                SUM(ganancia_bruta) AS gb,
-                SUM(comisiones) AS com,
-                SUM(propinas) AS prop,
-                SUM(tickets) AS tkt,
-                SUM(items_vendidos) AS itm,
-                SUM(items_sin_costo) AS sc_n,
-                SUM(monto_sin_costo) AS sc_m
-         FROM agg_daily_channel
-         WHERE fecha BETWEEN $1 AND $2
-         GROUP BY canal`,
+        `SELECT COALESCE(s.channel, 'salon') AS canal,
+                COALESCE(SUM(si.line_total), 0) AS vn,
+                COALESCE(SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_cost ELSE 0 END), 0) AS cmv,
+                COUNT(DISTINCT s.id) AS tkt,
+                COALESCE(SUM(si.quantity), 0) AS itm,
+                COUNT(*) FILTER (WHERE COALESCE(si.line_cost, 0) = 0 AND si.line_total > 0 AND s.channel <> 'delivery') AS sc_n,
+                COALESCE(SUM(CASE WHEN COALESCE(si.line_cost, 0) = 0 AND si.line_total > 0 AND s.channel <> 'delivery' THEN si.line_total ELSE 0 END), 0) AS sc_m
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         WHERE s.state = 'CLOSED' AND si.canceled = false
+           AND s.business_date BETWEEN $1::date AND $2::date
+         GROUP BY 1`,
         [dFrom, dTo]
       );
       for (const r of chRows) {
         const c = normalizeChannel(String(r.canal || "salon"));
         const vn = Number(r.vn || 0);
         const cCmv = Number(r.cmv || 0);
-        const cCom = Number(r.com || 0);
         const cTkt = Number(r.tkt || 0);
         porCanal[c].ventas += vn;
         porCanal[c].tickets += cTkt;
         porCanal[c].cmv += cCmv;
-        porCanal[c].comisiones += cCom;
 
         if (channel === "todos" || channel === c) {
-          ventasBrutas += Number(r.vb || 0);
-          descuentos += Number(r.desc || 0);
+          ventasBrutas += vn;
           ventasNetas += vn;
           cmv += cCmv;
-          gananciaBruta += Number(r.gb || vn - cCmv);
-          comisiones += cCom;
-          propinas += Number(r.prop || 0);
+          gananciaBruta += vn - cCmv;
           tickets += cTkt;
           itemsVendidos += Number(r.itm || 0);
           sinCostearCount += Number(r.sc_n || 0);
@@ -321,27 +357,34 @@ async function queryPeriodMetrics(
         }
       }
 
-      const dRows = await pgQueryAll<Record<string, unknown>>(
-        `SELECT gastos_fudo, medios_pago FROM agg_daily WHERE fecha BETWEEN $1 AND $2`,
+      const pmRows = await pgQueryAll<Record<string, unknown>>(
+        `SELECT m.key AS metodo, SUM((m.value)::numeric) AS monto
+         FROM sales s,
+              LATERAL jsonb_each_text(COALESCE(s.payload->'payments_summary'->'methods', '{}'::jsonb)) AS m
+         WHERE s.state = 'CLOSED' AND s.business_date BETWEEN $1::date AND $2::date
+         GROUP BY 1`,
         [dFrom, dTo]
       );
-      for (const r of dRows) {
-        gastosFudo += Number(r.gastos_fudo || 0);
-        const mp = (r.medios_pago || {}) as Record<string, number>;
-        for (const [k, v] of Object.entries(mp)) {
-          mediosMap.set(k, (mediosMap.get(k) || 0) + Number(v || 0));
-        }
+      for (const r of pmRows) {
+        const k = String(r.metodo || "Otro");
+        mediosMap.set(k, (mediosMap.get(k) || 0) + Number(r.monto || 0));
       }
 
-      const eRows = await pgQueryAll<Record<string, unknown>>(
-        `SELECT categoria, monto FROM sheet_expenses WHERE fecha BETWEEN $1 AND $2`,
+      const expRows = await pgQueryAll<Record<string, unknown>>(
+        `SELECT source, COALESCE(category_name, '') AS categoria, amount
+         FROM expenses
+         WHERE expense_date BETWEEN $1::date AND $2::date`,
         [dFrom, dTo]
       );
-      for (const e of eRows) {
-        const m = Number(e.monto || 0);
-        gastosPlanillaTotal += m;
-        if (isFixedCategory(String(e.categoria || ""))) gastosPlanillaFijos += m;
-        else gastosPlanillaRepo += m;
+      for (const e of expRows) {
+        const m = Number(e.amount || 0);
+        if (String(e.source) === "fudo") {
+          gastosFudo += m;
+        } else if (String(e.source) === "sheet") {
+          gastosPlanillaTotal += m;
+          if (isFixedCategory(String(e.categoria || ""))) gastosPlanillaFijos += m;
+          else gastosPlanillaRepo += m;
+        }
       }
     } catch {
       // Fallback to empty if PG tables not initialized yet
@@ -621,23 +664,39 @@ export async function categories(
 
   if (hasPostgresUrl()) {
     try {
-      const chFilter = channel !== "todos" ? "AND canal = $3" : "";
+      const chFilter = channel !== "todos" ? "AND s.channel = $3" : "AND s.channel <> 'delivery'";
       const params = channel !== "todos" ? [dFrom, dTo, channel] : [dFrom, dTo];
       catRows = await pgQueryAll(
-        `SELECT categoria, categoria_key,
-                SUM(ingreso) AS ing, SUM(costo) AS cos, SUM(ganancia) AS gan, SUM(cantidad) AS cant
-         FROM agg_daily_category
-         WHERE fecha BETWEEN $1 AND $2 ${chFilter}
-         GROUP BY categoria, categoria_key
+        `SELECT COALESCE(c.name, 'Sin categoría') AS categoria,
+                LOWER(COALESCE(c.name, 'sin categoria')) AS categoria_key,
+                SUM(si.line_total) AS ing,
+                SUM(si.line_cost) AS cos,
+                SUM(si.line_total - si.line_cost) AS gan,
+                SUM(si.quantity) AS cant
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         LEFT JOIN products p ON p.id = si.product_id
+         LEFT JOIN product_categories c ON c.id = p.category_id
+         WHERE s.state = 'CLOSED' AND si.canceled = false
+           AND s.business_date BETWEEN $1::date AND $2::date ${chFilter}
+         GROUP BY 1, 2
          ORDER BY ing DESC`,
         params
       );
       prodRows = await pgQueryAll(
-        `SELECT categoria_key, producto,
-                SUM(cantidad) AS cant, SUM(ingreso) AS ing, SUM(costo) AS cos, SUM(ganancia) AS gan
-         FROM agg_daily_product
-         WHERE fecha BETWEEN $1 AND $2 ${chFilter}
-         GROUP BY categoria_key, producto
+        `SELECT LOWER(COALESCE(c.name, 'sin categoria')) AS categoria_key,
+                COALESCE(p.name, 'Sin producto') AS producto,
+                SUM(si.quantity) AS cant,
+                SUM(si.line_total) AS ing,
+                SUM(si.line_cost) AS cos,
+                SUM(si.line_total - si.line_cost) AS gan
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         LEFT JOIN products p ON p.id = si.product_id
+         LEFT JOIN product_categories c ON c.id = p.category_id
+         WHERE s.state = 'CLOSED' AND si.canceled = false
+           AND s.business_date BETWEEN $1::date AND $2::date ${chFilter}
+         GROUP BY 1, 2
          ORDER BY ing DESC`,
         params
       );
@@ -740,47 +799,36 @@ export async function daily(
 ) {
   if (hasPostgresUrl()) {
     try {
-      if (channel !== "todos") {
-        const rows = await pgQueryAll<Record<string, unknown>>(
-          `SELECT fecha::text AS fecha,
-                  SUM(ventas_netas) AS ventas,
-                  SUM(cmv) AS cmv,
-                  SUM(ganancia_bruta) AS ganancia,
-                  SUM(tickets) AS tickets
-           FROM agg_daily_channel
-           WHERE fecha BETWEEN $1 AND $2 AND canal = $3
-           GROUP BY fecha
-           ORDER BY fecha ASC`,
-          [dFrom, dTo, channel]
-        );
-        return rows.map((r) => ({
-          fecha: String(r.fecha),
-          ventas: round(Number(r.ventas || 0)),
-          cmv: round(Number(r.cmv || 0)),
-          ganancia: round(Number(r.ganancia || 0)),
-          gastos: 0,
-          tickets: Number(r.tickets || 0),
-        }));
-      }
-
+      const chFilter = channel !== "todos" ? "AND s.channel = $3" : "";
+      const params = channel !== "todos" ? [dFrom, dTo, channel] : [dFrom, dTo];
       const rows = await pgQueryAll<Record<string, unknown>>(
-        `SELECT fecha::text AS fecha,
-                ventas_netas AS ventas,
-                cmv,
-                ganancia_bruta AS ganancia,
-                gastos_planilla + gastos_fudo AS gastos,
-                tickets
-         FROM agg_daily
-         WHERE fecha BETWEEN $1 AND $2
-         ORDER BY fecha ASC`,
+        `SELECT s.business_date::text AS fecha,
+                COALESCE(SUM(si.line_total), 0) AS ventas,
+                COALESCE(SUM(CASE WHEN s.channel <> 'delivery' THEN si.line_cost ELSE 0 END), 0) AS cmv,
+                COALESCE(SUM(si.line_total - CASE WHEN s.channel <> 'delivery' THEN si.line_cost ELSE 0 END), 0) AS ganancia,
+                COUNT(DISTINCT s.id) AS tickets
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         WHERE s.state = 'CLOSED' AND si.canceled = false
+           AND s.business_date BETWEEN $1::date AND $2::date ${chFilter}
+         GROUP BY s.business_date
+         ORDER BY s.business_date ASC`,
+        params
+      );
+      const expRows = await pgQueryAll<Record<string, unknown>>(
+        `SELECT expense_date::text AS fecha, COALESCE(SUM(amount), 0) AS gastos
+         FROM expenses
+         WHERE expense_date BETWEEN $1::date AND $2::date
+         GROUP BY expense_date`,
         [dFrom, dTo]
       );
+      const expMap = new Map(expRows.map((e) => [String(e.fecha), Number(e.gastos || 0)]));
       return rows.map((r) => ({
         fecha: String(r.fecha),
         ventas: round(Number(r.ventas || 0)),
         cmv: round(Number(r.cmv || 0)),
         ganancia: round(Number(r.ganancia || 0)),
-        gastos: round(Number(r.gastos || 0)),
+        gastos: round(expMap.get(String(r.fecha)) || 0),
         tickets: Number(r.tickets || 0),
       }));
     } catch {
@@ -844,21 +892,24 @@ export async function reconcileProviders(dFrom: string, dTo: string) {
   if (hasPostgresUrl()) {
     try {
       fudoRows = await pgQueryAll(
-        `SELECT COALESCE(proveedor, 'Sin proveedor') AS proveedor,
-                COALESCE(proveedor_key, 'sin proveedor') AS proveedor_key,
-                SUM(monto) AS tot, COUNT(*) AS n
-         FROM fudo_expenses
-         WHERE fecha BETWEEN $1 AND $2 AND estado != 'canceled'
-         GROUP BY proveedor, proveedor_key`,
+        `SELECT COALESCE(p.name, NULLIF(e.description, ''), 'Sin proveedor') AS proveedor,
+                LOWER(COALESCE(p.name, NULLIF(e.description, ''), 'sin proveedor')) AS proveedor_key,
+                SUM(e.amount) AS tot, COUNT(*) AS n
+         FROM expenses e
+         LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.source = 'fudo' AND e.expense_date BETWEEN $1::date AND $2::date
+         GROUP BY 1, 2`,
         [dFrom, dTo]
       );
       sheetRows = await pgQueryAll(
-        `SELECT COALESCE(proveedor, 'Sin proveedor') AS proveedor,
-                COALESCE(proveedor_key, 'sin proveedor') AS proveedor_key,
-                SUM(monto) AS tot, COUNT(*) AS n
-         FROM sheet_expenses
-         WHERE fecha BETWEEN $1 AND $2
-         GROUP BY proveedor, proveedor_key`,
+        `SELECT COALESCE(NULLIF(e.description, ''), NULLIF(e.payload->>'subcategoria', ''), 'Sin proveedor') AS proveedor,
+                LOWER(COALESCE(NULLIF(e.description, ''), NULLIF(e.payload->>'subcategoria', ''), 'sin proveedor')) AS proveedor_key,
+                SUM(e.amount) AS tot, COUNT(*) AS n
+         FROM expenses e
+         WHERE e.source = 'sheet'
+           AND LOWER(COALESCE(e.category_name, '')) LIKE 'reposic%'
+           AND e.expense_date BETWEEN $1::date AND $2::date
+         GROUP BY 1, 2`,
         [dFrom, dTo]
       );
     } catch {
@@ -961,17 +1012,27 @@ export async function expensesDetail(dFrom: string, dTo: string) {
   if (hasPostgresUrl()) {
     try {
       fudoMovs = await pgQueryAll(
-        `SELECT id, fecha::text AS fecha, categoria, proveedor, descripcion, monto, medio_pago, 'fudo' AS origen
-         FROM fudo_expenses
-         WHERE fecha BETWEEN $1 AND $2 AND estado != 'canceled'
-         ORDER BY fecha DESC LIMIT 250`,
+        `SELECT e.id, e.expense_date::text AS fecha,
+                COALESCE(e.category_name, 'Compras y proveedores') AS categoria,
+                COALESCE(p.name, NULLIF(e.description, ''), 'Sin proveedor') AS proveedor,
+                COALESCE(e.description, '') AS descripcion,
+                e.amount::float AS monto, 'Efectivo' AS medio_pago, 'fudo' AS origen
+         FROM expenses e
+         LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.source = 'fudo' AND e.expense_date BETWEEN $1::date AND $2::date
+         ORDER BY e.expense_date DESC LIMIT 250`,
         [dFrom, dTo]
       );
       sheetMovs = await pgQueryAll(
-        `SELECT id, fecha::text AS fecha, categoria, proveedor, descripcion, monto, medio_pago, 'planilla' AS origen
-         FROM sheet_expenses
-         WHERE fecha BETWEEN $1 AND $2
-         ORDER BY fecha DESC LIMIT 250`,
+        `SELECT e.id, e.expense_date::text AS fecha,
+                COALESCE(e.category_name, 'Sin categoría') AS categoria,
+                COALESCE(p.name, NULLIF(e.description, ''), 'Sin proveedor') AS proveedor,
+                COALESCE(e.description, '') AS descripcion,
+                e.amount::float AS monto, 'Efectivo' AS medio_pago, 'planilla' AS origen
+         FROM expenses e
+         LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.source = 'sheet' AND e.expense_date BETWEEN $1::date AND $2::date
+         ORDER BY e.expense_date DESC LIMIT 250`,
         [dFrom, dTo]
       );
     } catch {
@@ -1348,12 +1409,12 @@ export async function meta() {
   if (hasPostgresUrl()) {
     try {
       const r = await pgQueryOne<{ min_d: string; max_d: string }>(
-        "SELECT MIN(fecha)::text AS min_d, MAX(fecha)::text AS max_d FROM agg_daily"
+        "SELECT MIN(business_date)::text AS min_d, MAX(business_date)::text AS max_d FROM sales"
       );
       if (r?.min_d) minDate = r.min_d;
       if (r?.max_d) maxDate = r.max_d;
       const sr = await pgQueryOne<{ finished_at: string }>(
-        "SELECT finished_at::text AS finished_at FROM sync_state ORDER BY finished_at DESC LIMIT 1"
+        "SELECT finished_at::text AS finished_at FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
       );
       if (sr?.finished_at) lastSync = sr.finished_at;
     } catch {

@@ -1,17 +1,18 @@
 FROM node:22-slim
 
-ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
-    HOST=0.0.0.0 \
-    PORT=8080
-
 WORKDIR /app
 
+ENV NEXT_TELEMETRY_DISABLED=1
+
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY tsconfig.json next.config.ts tailwind.config.ts postcss.config.mjs components.json ./
 COPY src ./src
+
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=8080
 
 RUN mkdir -p /app/data && npm run build
 

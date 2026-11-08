@@ -17,7 +17,7 @@ import {
   queryOne,
   runTransaction,
 } from "../db/local-db";
-import { hasPostgresUrl, pgExecute, pgQueryAll } from "../db/pg-db";
+import { hasPostgresUrl, pgExecute, pgQueryAll, pgQueryOne } from "../db/pg-db";
 import { isFixedCategory } from "../analytics/local-analytics";
 
 export const CONTABLE_SHEET_ID = "1gNitzY7n44UYr1FP-RFpIPchRT4A1oSh";
@@ -686,20 +686,24 @@ async function ensurePgContableTable() {
 export async function loadFudoExpensesForMonth(
   mesKey: string
 ): Promise<FudoExpenseRecord[]> {
+  const [yr, mo] = mesKey.split("-").map(Number);
+  const lastDay = yr && mo ? new Date(Date.UTC(yr, mo, 0)).getUTCDate() : 31;
   const dFrom = `${mesKey}-01`;
-  const dTo = `${mesKey}-31`;
+  const dTo = `${mesKey}-${String(lastDay).padStart(2, "0")}`;
 
   if (hasPostgresUrl()) {
     try {
       const rows = await pgQueryAll<Record<string, unknown>>(
-        `SELECT id::text AS id,
-                COALESCE(fecha::text, expense_date::text) AS fecha,
-                COALESCE(proveedor, provider_name, '') AS proveedor,
-                COALESCE(categoria, category_name, '') AS categoria,
-                COALESCE(descripcion, description, '') AS descripcion,
-                 COALESCE(monto, amount, 0) AS monto
-         FROM fudo_expenses
-         WHERE COALESCE(fecha::text, expense_date::text) BETWEEN $1 AND $2`,
+        `SELECT COALESCE(e.external_id, e.id::text) AS id,
+                e.expense_date::text AS fecha,
+                COALESCE(p.name, NULLIF(e.description, ''), '') AS proveedor,
+                COALESCE(e.category_name, '') AS categoria,
+                COALESCE(e.description, '') AS descripcion,
+                COALESCE(e.amount, 0) AS monto
+         FROM expenses e
+         LEFT JOIN providers p ON p.id = e.provider_id
+         WHERE e.source = 'fudo'
+           AND e.expense_date BETWEEN $1::date AND $2::date`,
         [dFrom, dTo]
       );
       return rows.map((r) => ({
@@ -915,10 +919,23 @@ export async function syncAndReconcileContableMonth(options: {
     try {
       await ensurePgContableTable();
       await pgExecute("DELETE FROM contable_ledger WHERE mes_key = $1", [mesKey]);
-      await pgExecute(
-        "DELETE FROM external_expenses WHERE mes_key = $1 AND descripcion LIKE '[Contable Auto]%'",
-        [mesKey]
-      );
+      const [yr, mo] = mesKey.split("-").map(Number);
+      const lastDay = yr && mo ? new Date(Date.UTC(yr, mo, 0)).getUTCDate() : 31;
+      const dFrom = `${mesKey}-01`;
+      const dTo = `${mesKey}-${String(lastDay).padStart(2, "0")}`;
+      try {
+        await pgExecute(
+          "DELETE FROM external_expenses WHERE name LIKE '[Contable Auto]%' AND expense_date BETWEEN $1::date AND $2::date",
+          [dFrom, dTo]
+        );
+      } catch {
+        // ignore if schema differs
+      }
+      const venueRow = await pgQueryOne<{ id: number }>(
+        "SELECT id FROM venues ORDER BY id ASC LIMIT 1"
+      ).catch(() => undefined);
+      const vid = venueRow?.id || 1;
+
       for (const it of cross.items) {
         await pgExecute(
           `INSERT INTO contable_ledger (
@@ -966,23 +983,24 @@ export async function syncAndReconcileContableMonth(options: {
 
         if (it.origen_clasificado !== "proveedores_varios" && it.posicion_actual !== "ignorado") {
           const esFijo = it.posicion_actual === "caja_grande_fijo";
-          const autoDesc = `[Contable Auto] ${it.detalle || it.observaciones || it.tipo || it.cuenta} (Fila ${it.fila_origen})`;
-          await pgExecute(
-            `INSERT INTO external_expenses (
-              fecha, mes_key, categoria, categoria_key, proveedor, proveedor_key, descripcion, monto, es_fijo
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-            [
-              it.fecha,
-              it.mes_key,
-              it.cuenta || "Gasto Externo Contable",
-              normKey(it.cuenta || "gasto externo contable"),
-              it.proveedor,
-              it.proveedor_key,
-              autoDesc,
-              it.monto_efectivo,
-              esFijo,
-            ]
-          );
+          const autoName = `[Contable Auto] ${it.proveedor} · ${it.cuenta} (${it.celda_ref})`.slice(0, 80);
+          try {
+            await pgExecute(
+              `INSERT INTO external_expenses (
+                venue_id, kind, name, amount, expense_date, frequency, start_date
+              ) VALUES ($1, $2, $3, $4, $5::date, $6, $5::date)`,
+              [
+                vid,
+                esFijo ? "fijo" : "excepcional",
+                autoName,
+                it.monto_efectivo,
+                it.fecha,
+                esFijo ? "mensual" : null,
+              ]
+            );
+          } catch {
+            // ignore if schema differs
+          }
         }
       }
     } catch {

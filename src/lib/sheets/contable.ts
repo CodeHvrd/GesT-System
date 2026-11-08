@@ -240,13 +240,20 @@ export function parseContableRows(
   const mesKey = explicitMesKey || monthKeyFromContableTab(tabNameOrMonth);
   const hojaMes = contableTabNameForMonth(mesKey);
 
-  // Localizar fila de encabezado buscando "Cuenta" y ("Entrada" o "Salida" o "Fecha")
+  // Localizar fila de encabezado buscando "Cuenta" y ("Descripción" o "Entrada" o "Salida" o "Fecha")
   let headerIdx = 0;
   for (let i = 0; i < Math.min(rows.length, 15); i++) {
     const lineKeys = rows[i].map((c) => normKey(c));
     if (
       lineKeys.some((k) => k.includes("cuenta")) &&
-      lineKeys.some((k) => k.includes("entrada") || k.includes("salida") || k.includes("fecha"))
+      lineKeys.some(
+        (k) =>
+          k.includes("descripcion") ||
+          k.includes("entrada") ||
+          k.includes("salida") ||
+          k.includes("fecha") ||
+          k.includes("saldo")
+      )
     ) {
       headerIdx = i;
       break;
@@ -256,7 +263,7 @@ export function parseContableRows(
   const header = rows[headerIdx] || [];
   const normHeader = header.map((h) => normKey(h));
 
-  // Detectar índices respetando que hay dos columnas "Descripción" (col 1 = Proveedor, col 4 = Detalle)
+  // Detectar índices respetando que hay dos columnas "Descripción" y que algunas hojas tienen col 0 = "mes+año"
   const descIndices: number[] = [];
   normHeader.forEach((h, idx) => {
     if (h.includes("descripcion") || h.includes("proveedor")) {
@@ -269,15 +276,15 @@ export function parseContableRows(
     return found >= 0 ? found : fallback;
   };
 
-  const iFecha = findIdx((h) => h.includes("fecha"), 0);
-  const iProv = descIndices.length > 0 ? descIndices[0] : 1;
-  const iCuenta = findIdx((h) => h.includes("cuenta"), 2);
-  const iTipo = findIdx((h) => h === "tipo" || h.startsWith("tipo"), 3);
-  const iDetalle = descIndices.length > 1 ? descIndices[1] : 4;
-  const iEntrada = findIdx((h) => h.includes("entrada"), 5);
-  const iSalida = findIdx((h) => h.includes("salida"), 6);
-  const iSaldo = findIdx((h) => h.includes("saldo"), 7);
-  const iObs = findIdx((h) => h.includes("observacion"), 8);
+  const iCuenta = findIdx((h) => h.includes("cuenta"), descIndices.length > 0 ? descIndices[0] + 1 : 2);
+  const iProv = descIndices.length > 0 ? descIndices[0] : Math.max(1, iCuenta - 1);
+  const iFecha = findIdx((h) => h.includes("fecha"), Math.max(0, iProv - 1));
+  const iTipo = findIdx((h) => h === "tipo" || h.startsWith("tipo"), iCuenta + 1);
+  const iDetalle = descIndices.length > 1 ? descIndices[1] : iCuenta + 2;
+  const iEntrada = findIdx((h) => h.includes("entrada"), iCuenta + 3);
+  const iSalida = findIdx((h) => h.includes("salida"), iCuenta + 4);
+  const iSaldo = findIdx((h) => h.includes("saldo"), iCuenta + 5);
+  const iObs = findIdx((h) => h.includes("observacion"), iCuenta + 6);
 
   const items: ContableLedgerItem[] = [];
   let lastValidDate = `${mesKey}-01`;

@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b2921">
+<title>GesT · Resumen de gestión</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b6b53'/%3E%3Ctext x='32' y='43' font-family='system-ui,sans-serif' font-size='30' font-weight='700' fill='white' text-anchor='middle'%3EG%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/cloud.css">
+</head>
+<body>
+<div class="page">
+  <!-- 1 · Barra superior del sistema (Marca + Acciones rápidas: Info/Notificaciones, Recarga Fudo, Recarga V) -->
+  <header class="hero">
+    <div class="brand">
+      <div class="mark">G</div>
+      <div>
+        <div class="brand-title-row">
+          <h1 id="brand-name">Bois</h1>
+          <span class="brand-tag">GesT · Gestión Gastronómica</span>
+          <span id="ver-top" class="ver-pill" hidden></span>
+        </div>
+        <p id="freshness" class="fresh">Cargando estado de sincronización…</p>
+        <form id="fudo-creds-form" class="fudo-creds" hidden autocomplete="off">
+          <input type="text" name="api_key" placeholder="Fudo API Key" required>
+          <input type="password" name="api_secret" placeholder="Fudo API Secret" required>
+          <button type="submit" class="btn">Guardar y sincronizar</button>
+        </form>
+        <p id="sync-msg" class="sync-msg" hidden></p>
+      </div>
+    </div>
+
+    <div class="hero-actions">
+      <!-- Botón Info: despliega ventana flotante de Notificaciones -->
+      <div class="notif-anchor">
+        <button type="button" id="btn-notif-toggle" class="icon-action-btn info-btn" title="Ver notificaciones y alertas del período" aria-expanded="false">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="16" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+          </svg>
+          <span class="icon-label">Alertas</span>
+          <span id="notif-badge" class="notif-badge">0</span>
+        </button>
+
+        <!-- Ventana flotante de Notificaciones -->
+        <div id="notif-popover" class="notif-popover" hidden>
+          <div class="notif-pop-head">
+            <div>
+              <h3>Notificaciones del período</h3>
+              <span id="notif-pop-sub" class="muted">Clasificadas por prioridad</span>
+            </div>
+            <button type="button" id="btn-close-notif" class="pop-close" aria-label="Cerrar">×</button>
+          </div>
+          <div class="notif-pop-tabs">
+            <button type="button" class="np-tab active" data-np-tab="all">Todas <b id="np-c-all">0</b></button>
+            <button type="button" class="np-tab critico" data-np-tab="critico">Crítico <b id="np-c-critico">0</b></button>
+            <button type="button" class="np-tab atencion" data-np-tab="atencion">Atención <b id="np-c-atencion">0</b></button>
+            <button type="button" class="np-tab info" data-np-tab="info">Info <b id="np-c-info">0</b></button>
+          </div>
+          <div id="notif-pop-list" class="notif-pop-list"></div>
+          <div class="notif-pop-foot">
+            <button type="button" id="btn-go-notificaciones" class="btn-goto-section">
+              Ir a la sección Notificaciones para atender cada novedad →
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Botón Recarga Fudo (Solo logo, sin texto) -->
+      <button type="button" id="btn-sync-fudo" class="icon-action-btn sync-btn icon-only" title="Sincronizar ventas y gastos con Fudo y Planillas (Auto: 02:00 hs y 16:00 hs ARG)" aria-label="Sincronizar Fudo">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+          <path d="M3 3v5h5"></path>
+          <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
+          <path d="M16 16h5v5"></path>
+        </svg>
+      </button>
+
+      <!-- Botón Versión (Solo logo, sin texto ni letra V) -->
+      <button type="button" id="btn-update-top" class="icon-action-btn ver-reload-btn icon-only" title="Recargar última versión publicada (Git)" aria-label="Actualizar versión">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="6" y1="3" x2="6" y2="15"></line>
+          <circle cx="18" cy="6" r="3"></circle>
+          <circle cx="6" cy="18" r="3"></circle>
+          <path d="M18 9a9 9 0 0 1-9 9"></path>
+        </svg>
+        <span id="ver-dot" class="ver-dot" hidden></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 2 · Estructura principal: Menú lateral izquierdo + Vista de la sección activa -->
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Secciones del sistema">
+      <div class="sidebar-group-title">Menú principal</div>
+      <nav class="side-nav">
+        <button type="button" class="side-link active" data-nav="dashboard">
+          <span class="side-ic">📊</span>
+          <span class="side-txt">
+            <strong>Dashboard</strong>
+            <small>Resumen e indicadores</small>
+          </span>
+        </button>
+        <button type="button" class="side-link" data-nav="ventas">
+          <span class="side-ic">💰</span>
+          <span class="side-txt">
+            <strong>Ventas</strong>
+            <small>Delivery, Salón y Pagos</small>
+          </span>
+        </button>
+        <button type="button" class="side-link" data-nav="ganancias">
+          <span class="side-ic">📈</span>
+          <span class="side-txt">
+            <strong>Ganancias</strong>
+            <small>Ecuación, CMV y Márgenes</small>
+          </span>
+        </button>
+        <button type="button" class="side-link" data-nav="gastos">
+          <span class="side-ic">🧾</span>
+          <span class="side-txt">
+            <strong>Gastos</strong>
+            <small>Fudo, Externos y Fijos</small>
+          </span>
+        </button>
+        <button type="button" class="side-link" data-nav="notificaciones">
+          <span class="side-ic">🔔</span>
+          <span class="side-txt">
+            <strong>Notificaciones</strong>
+            <small>Novedades para atender</small>
+          </span>
+          <span id="side-notif-count" class="side-pill">0</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-help">
+        <div class="help-title">💡 Guía rápida</div>
+        <p>Pasá el mouse sobre <b>Ventas</b>, <b>Ganancia Bruta</b> o <b>Gastos</b> y hacé click para desplegar su detalle en el momento.</p>
+      </div>
+    </aside>
+
+    <main id="main" class="workspace">
+      <!-- Barra de filtros y presets dentro de la categoría/sección activa -->
+      <section class="filter-bar card">
+        <div class="filter-section-info">
+          <span id="active-section-badge" class="section-badge">📊 Dashboard</span>
+          <h2 id="active-section-title">Resumen general del negocio</h2>
+        </div>
+        <div class="period-controls">
+          <div class="presets" role="group" aria-label="Períodos rápidos">
+            <button type="button" class="chip active" data-preset="week">Semana actual</button>
+            <button type="button" class="chip" data-preset="month">Mes actual</button>
+            <button type="button" class="chip" data-preset="prev-month">Mes pasado</button>
+          </div>
+          <div class="dates">
+            <label>Desde <input type="date" id="from"></label>
+            <label>Hasta <input type="date" id="to"></label>
+            <button type="button" id="apply" class="btn btn-solid">Ver período</button>
+          </div>
+        </div>
+      </section>
+
+      <div id="loading" class="loading card"><span class="spinner"></span> Cargando datos del período…</div>
+
+      <div id="content" hidden>
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 1: DASHBOARD (Vista general + Cuadro interactivo)       -->
+        <!-- ============================================================== -->
+        <div class="section-view" data-view="dashboard">
+          <section class="card status-card">
+            <div class="status-top">
+              <div>
+                <div class="period-eyebrow">Cuadro del período seleccionado</div>
+                <h2 id="period-title">Semana actual</h2>
+                <span id="period-label" class="muted"></span>
+              </div>
+              <span id="status-pill" class="pill"></span>
+            </div>
+
+            <div id="progress" class="progress"></div>
+
+            <p class="interactive-hint">
+              <span>✨ Acercá el cursor y hacé click en cualquier recuadro para expandir su desglose aquí mismo:</span>
+            </p>
+
+            <!-- 3 recuadros principales interactivos: Ventas, Ganancia Bruta, Gastos -->
+            <section id="kpis" class="kpis kpis-3"></section>
+
+            <!-- Panel desplegable in-situ al clickear Ventas, Ganancia Bruta o Gastos -->
+            <div id="kpi-expanded" class="kpi-expanded" hidden></div>
+
+            <div id="result" class="result-banner"></div>
+          </section>
+
+          <div class="dash-grid-2">
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Evolución diaria de ventas</h2>
+                  <span id="chart-note" class="muted"></span>
+                </div>
+                <button type="button" class="link-pill" data-goto="ventas">Ir a "Ventas" →</button>
+              </div>
+              <div class="chart-wrap">
+                <svg id="chart" viewBox="0 0 820 230" preserveAspectRatio="none" role="img" aria-label="Ventas por día"></svg>
+              </div>
+              <div class="legend">
+                <span><i class="dot delivery"></i> Delivery y Take Away</span>
+                <span><i class="dot menu"></i> Salón (Mesas)</span>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Categorías más vendidas</h2>
+                  <span id="dash-cats-note" class="muted"></span>
+                </div>
+                <button type="button" class="link-pill" data-goto="ganancias">Ver CMV en "Ganancias" →</button>
+              </div>
+              <div id="dash-cats" class="cats"></div>
+            </section>
+          </div>
+        </div>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 2: VENTAS                                              -->
+        <!-- ============================================================== -->
+        <div class="section-view" data-view="ventas" hidden>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Participación por Canal y Medios de Pago</h2>
+                <span class="muted">Desglose real entre Delivery / Fuera de salón, Salón y formas de cobro</span>
+              </div>
+            </div>
+            <div id="ventas-overview" class="ventas-overview"></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Ventas día por día</h2>
+                <span id="chart-ventas-note" class="muted"></span>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <svg id="chart-ventas" viewBox="0 0 820 230" preserveAspectRatio="none" role="img" aria-label="Ventas por día"></svg>
+            </div>
+            <div class="legend">
+              <span><i class="dot delivery"></i> Delivery y Take Away (Envíos / Mostrador + Apps)</span>
+              <span><i class="dot menu"></i> Salón (Mesas en el local)</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Lo que más se vende por categoría y producto</h2>
+                <span id="cats-note" class="muted"></span>
+              </div>
+            </div>
+            <div id="cats" class="cats"></div>
+          </section>
+        </div>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 3: GANANCIAS                                           -->
+        <!-- ============================================================== -->
+        <div class="section-view" data-view="ganancias" hidden>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Ecuación de Ganancia Bruta y Resultado del Período</h2>
+                <span class="muted">Cómo se compone el margen bruto y el resultado neto en el período seleccionado</span>
+              </div>
+            </div>
+            <div id="ganancias-equation" class="ganancias-equation"></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Rentabilidad y CMV por Categoría de Carta</h2>
+                <span class="muted">Comparación del costo de mercadería contra el objetivo de cada rubro</span>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="ganancias-table">
+                <thead>
+                  <tr>
+                    <th>Categoría</th>
+                    <th class="r">Unidades</th>
+                    <th class="r">Ventas</th>
+                    <th class="r">Costo (CMV)</th>
+                    <th class="r">Ganancia Bruta</th>
+                    <th class="r">CMV %</th>
+                    <th class="r">Objetivo CMV</th>
+                    <th>Estado</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 4: GASTOS                                              -->
+        <!-- ============================================================== -->
+        <div class="section-view" data-view="gastos" hidden>
+          <!-- Resumen general de Gastos separado en Fudo/Contable, Externos (sin reposición) y Fijos -->
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Resumen y Separación de Gastos del Período</h2>
+                <span class="muted">Separación entre Gastos Fudo / Contable, Gastos Externos (Planilla Gestión sin reposición) y Gastos Fijos</span>
+              </div>
+            </div>
+            <div id="gastos-summary-cards" class="gastos-summary-cards"></div>
+          </section>
+
+          <!-- Comparación Gastos Fudo (API) vs Planilla Contable / Reposiciones -->
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>1 · Gastos Fudo vs Planilla Contable / Reposición</h2>
+                <span class="muted">Corroboración entre lo cargado en Fudo API y las reposiciones en Planilla</span>
+              </div>
+              <div class="sheet-links">
+                <a href="https://docs.google.com/spreadsheets/d/1pfqxfnFSHb291bF2lSDuRs_czDu1v0YcI3W1NE79mJ0/edit?gid=133421437#gid=133421437" target="_blank" rel="noopener" class="link-pill">📄 Abrir Planilla Gestión ↗</a>
+                <a href="https://docs.google.com/spreadsheets/d/1gNitzY7n44UYr1FP-RFpIPchRT4A1oSh/edit?gid=1313414032#gid=1313414032" target="_blank" rel="noopener" class="link-pill">📗 Abrir Planilla Contable (NOVIEMBRE 26) ↗</a>
+              </div>
+            </div>
+            <div id="contable-alert" class="contable-alert" hidden></div>
+
+            <div class="table-wrap">
+              <table id="cross">
+                <thead>
+                  <tr>
+                    <th>Mes</th>
+                    <th class="r">Fudo API</th>
+                    <th class="r">Planilla (Proveedores Varios)</th>
+                    <th class="r">Diferencia</th>
+                    <th class="r">Gastos Externos</th>
+                    <th class="r">Gastos Fijos</th>
+                    <th class="r">Total Mes</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <div class="reconcile-block" id="reconcile-contable-fudo-wrap">
+              <h3>🔍 Revisión: Gastos que NO están en ambas listas (<code>Gastos Fudo</code> ↔ <code>Proveedores Varios</code>)</h3>
+              <p class="muted">Los gastos de otras cuentas contables (Servicios, Impuestos, Caja Principal, Caja Grande) se guardan automáticamente como Externos en la DB. Aquí solo figuran los comprobantes que faltan en Fudo o faltan en <b>Proveedores Varios</b>, con hipervínculo directo a la celda de Google Sheets.</p>
+              <div id="reconcile-contable-fudo" class="table-wrap"></div>
+            </div>
+
+            <div class="reconcile-block">
+              <h3>Corroboración por Proveedor en el período seleccionado (Planilla vs Fudo API)</h3>
+              <p class="muted">Muestra en qué proveedores difiere la Planilla Contable (Proveedores Varios) respecto a lo cargado en Fudo.</p>
+              <div id="reconcile-providers" class="table-wrap"></div>
+            </div>
+          </section>
+
+          <!-- Gastos Externos (No Reposición) y Gastos Fijos separados -->
+          <div class="dash-grid-2">
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>2 · Gastos Externos (Sin Reposición)</h2>
+                  <span class="muted">Salen de Planilla Gestión excluyendo Reposiciones</span>
+                </div>
+              </div>
+              <div id="gastos-externos-box"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>3 · Gastos Fijos (Separados)</h2>
+                  <span class="muted">Sueldos, Alquiler, Servicios Base, Impuestos y Fijos</span>
+                </div>
+              </div>
+              <div id="gastos-fijos-box"></div>
+            </section>
+          </div>
+
+          <!-- Carga rápida de Gastos Externos o Fijos adicionales desde el portal -->
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Registrar gasto adicional en GesT</h2>
+                <span class="muted">Para sumar un gasto puntual o fijo aún no pasado a la planilla</span>
+              </div>
+            </div>
+            <form id="ext-form" class="ext-form" autocomplete="off">
+              <label class="f-kind">Tipo
+                <select id="ext-kind" name="tipo">
+                  <option value="excepcional">Excepcional (una vez)</option>
+                  <option value="fijo">Fijo (se repite)</option>
+                </select>
+              </label>
+              <label class="f-name">Concepto <input id="ext-name" name="nombre" maxlength="80" placeholder="Ej: Reparación heladera, insumo extra" required></label>
+              <label class="f-amount">Monto <input id="ext-amount" name="monto" inputmode="decimal" placeholder="0" required></label>
+              <label class="f-freq" id="ext-freq-box" hidden>Se repite
+                <select id="ext-freq" name="frecuencia">
+                  <option value="mensual">Cada mes</option>
+                  <option value="semanal">Cada semana</option>
+                </select>
+              </label>
+              <label class="f-date"><span id="ext-date-label">Fecha</span> <input type="date" id="ext-date" name="fecha"></label>
+              <button type="submit" class="btn btn-solid">Agregar gasto</button>
+            </form>
+            <p id="ext-msg" class="form-msg" role="status"></p>
+            <div class="ext-cols">
+              <div>
+                <h3>Fijos cargados en portal</h3>
+                <div id="ext-fijos"></div>
+              </div>
+              <div>
+                <h3>Excepcionales cargados en portal</h3>
+                <div id="ext-exc"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Visualización y descripción de TODOS los gastos -->
+          <section class="card" id="all-expenses-card">
+            <div class="card-head">
+              <div>
+                <h2>4 · Visualización y Descripción de Todos los Gastos</h2>
+                <span id="all-expenses-count" class="muted"></span>
+              </div>
+              <div class="exp-filters">
+                <div class="exp-filter-pills" id="exp-group-filters">
+                  <button type="button" class="chip small active" data-exp-filter="all">Todos</button>
+                  <button type="button" class="chip small" data-exp-filter="reposicion">Planilla Reposición</button>
+                  <button type="button" class="chip small" data-exp-filter="fudo">Fudo API</button>
+                  <button type="button" class="chip small" data-exp-filter="externo">Externos (s/reposición)</button>
+                  <button type="button" class="chip small" data-exp-filter="fijo">Gastos Fijos</button>
+                </div>
+                <input type="search" id="exp-search" class="exp-search" placeholder="Buscar proveedor, categoría o descripción…">
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="all-expenses-table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Origen</th>
+                    <th>Categoría</th>
+                    <th>Subcategoría / Rubro</th>
+                    <th>Descripción / Proveedor</th>
+                    <th class="r">Monto</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 5: NOTIFICACIONES                                      -->
+        <!-- ============================================================== -->
+        <div class="section-view" data-view="notificaciones" hidden>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Centro de Notificaciones y Revisión</h2>
+                <span class="muted">Atendé cada novedad del negocio clasificada por prioridad e impacto</span>
+              </div>
+              <div class="notif-filter-bar">
+                <button type="button" class="chip small active" data-nf-area="all">Todas las áreas</button>
+                <button type="button" class="chip small" data-nf-area="gastos">Gastos y Proveedores</button>
+                <button type="button" class="chip small" data-nf-area="ventas">Ventas y Canales</button>
+                <button type="button" class="chip small" data-nf-area="ganancias">Ganancias y CMV</button>
+              </div>
+            </div>
+
+            <div class="levels">
+              <div class="level critico">
+                <h3>🔴 Crítico <b id="n-critico">0</b></h3>
+                <div id="rev-critico"></div>
+              </div>
+              <div class="level atencion">
+                <h3>🟠 Atención <b id="n-atencion">0</b></h3>
+                <div id="rev-atencion"></div>
+              </div>
+              <div class="level info">
+                <h3>🔵 Información <b id="n-info">0</b></h3>
+                <div id="rev-info"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="foot">
+          <div id="foot"></div>
+          <div class="version-bar">
+            <span id="ver-badge" class="ver-badge">Versión —</span>
+            <span id="ver-msg" class="ver-msg" role="status"></span>
+          </div>
+        </footer>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="/cloud.js"></script>
+</body>
+</html>

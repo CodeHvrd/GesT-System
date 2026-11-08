@@ -61,6 +61,8 @@ export interface ContableLedgerItem {
   hoja_mes: string;
   mes_key: string;
   fila_origen: number;
+  celda_ref: string;
+  sheet_cell_url: string;
   fecha: string;
   proveedor: string;
   proveedor_key: string;
@@ -81,6 +83,20 @@ export interface ContableLedgerItem {
   resuelto: boolean;
   resolucion_accion: string;
   resolucion_nota: string;
+}
+
+/**
+ * Construye el hipervínculo directo a la celda/fila de la Planilla Contable en Google Sheets
+ * donde está pasado el gasto (ej. columna B = Descripción/Proveedor en la fila `filaOrigen`).
+ */
+export function buildContableCellUrl(
+  filaOrigen: number,
+  colLetter = "B",
+  sheetId = CONTABLE_SHEET_ID,
+  gid = CONTABLE_DEFAULT_GID
+): string {
+  const rowNum = Math.max(1, Number(filaOrigen || 1));
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/edit?gid=${gid}#gid=${gid}&range=${colLetter}${rowNum}`;
 }
 
 export interface FudoExpenseRecord {
@@ -335,6 +351,8 @@ export function parseContableRows(
     }
 
     const filaOrigen = r + 1;
+    const celdaRef = `B${filaOrigen}`;
+    const sheetCellUrl = buildContableCellUrl(filaOrigen, "B");
     const hash = sha1Hash(
       hojaMes,
       filaOrigen,
@@ -350,6 +368,8 @@ export function parseContableRows(
       hoja_mes: hojaMes,
       mes_key: mesKey,
       fila_origen: filaOrigen,
+      celda_ref: celdaRef,
+      sheet_cell_url: sheetCellUrl,
       fecha,
       proveedor: proveedor || detalle || "Sin especificar",
       proveedor_key: normProvider(proveedor || detalle),
@@ -814,9 +834,13 @@ export async function syncAndReconcileContableMonth(options: {
     }
   }
 
-  // Persistir en SQLite
+  // Persistir en SQLite (tanto en contable_ledger como auto-guardar en external_expenses los que NO son "Proveedores Varios")
   runTransaction(() => {
     executeSql("DELETE FROM contable_ledger WHERE mes_key = ?", [mesKey]);
+    executeSql(
+      "DELETE FROM external_expenses WHERE mes_key = ? AND descripcion LIKE '[Contable Auto]%'",
+      [mesKey]
+    );
     for (const it of cross.items) {
       executeSql(
         `INSERT INTO contable_ledger (
@@ -853,6 +877,29 @@ export async function syncAndReconcileContableMonth(options: {
           it.resolucion_nota,
         ]
       );
+
+      // Regla: si NO es "Proveedores Varios", se guarda automáticamente como Gasto Externo en la DB
+      if (it.origen_clasificado !== "proveedores_varios" && it.posicion_actual !== "ignorado") {
+        const esFijo = it.posicion_actual === "caja_grande_fijo" ? 1 : 0;
+        const autoDesc = `[Contable Auto] ${it.detalle || it.observaciones || it.tipo || it.cuenta} (Fila ${it.fila_origen})`;
+        executeSql(
+          `INSERT INTO external_expenses (
+            creado_en, fecha, mes_key, categoria, categoria_key, proveedor, proveedor_key, descripcion, monto, es_fijo
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            new Date().toISOString(),
+            it.fecha,
+            it.mes_key,
+            it.cuenta || "Gasto Externo Contable",
+            normKey(it.cuenta || "gasto externo contable"),
+            it.proveedor,
+            it.proveedor_key,
+            autoDesc,
+            it.monto_efectivo,
+            esFijo,
+          ]
+        );
+      }
     }
   });
 
@@ -861,6 +908,10 @@ export async function syncAndReconcileContableMonth(options: {
     try {
       await ensurePgContableTable();
       await pgExecute("DELETE FROM contable_ledger WHERE mes_key = $1", [mesKey]);
+      await pgExecute(
+        "DELETE FROM external_expenses WHERE mes_key = $1 AND descripcion LIKE '[Contable Auto]%'",
+        [mesKey]
+      );
       for (const it of cross.items) {
         await pgExecute(
           `INSERT INTO contable_ledger (
@@ -905,6 +956,27 @@ export async function syncAndReconcileContableMonth(options: {
             it.resolucion_nota,
           ]
         );
+
+        if (it.origen_clasificado !== "proveedores_varios" && it.posicion_actual !== "ignorado") {
+          const esFijo = it.posicion_actual === "caja_grande_fijo";
+          const autoDesc = `[Contable Auto] ${it.detalle || it.observaciones || it.tipo || it.cuenta} (Fila ${it.fila_origen})`;
+          await pgExecute(
+            `INSERT INTO external_expenses (
+              fecha, mes_key, categoria, categoria_key, proveedor, proveedor_key, descripcion, monto, es_fijo
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              it.fecha,
+              it.mes_key,
+              it.cuenta || "Gasto Externo Contable",
+              normKey(it.cuenta || "gasto externo contable"),
+              it.proveedor,
+              it.proveedor_key,
+              autoDesc,
+              it.monto_efectivo,
+              esFijo,
+            ]
+          );
+        }
       }
     } catch {
       // ignore if PG is offline
@@ -943,41 +1015,46 @@ export async function getContableReconciliation(mesKeyOrTab = "NOVIEMBRE 26") {
     }
   }
 
-  const items: ContableLedgerItem[] = rows.map((r) => ({
-    id: Number(r.id),
-    hash: String(r.hash || ""),
-    hoja_mes: String(r.hoja_mes || hojaMes),
-    mes_key: String(r.mes_key || mesKey),
-    fila_origen: Number(r.fila_origen || 0),
-    fecha: String(r.fecha || ""),
-    proveedor: String(r.proveedor || ""),
-    proveedor_key: String(r.proveedor_key || ""),
-    cuenta: String(r.cuenta || ""),
-    tipo: String(r.tipo || ""),
-    detalle: String(r.detalle || ""),
-    entrada_d: Number(r.entrada_d || 0),
-    salida_h: Number(r.salida_h || 0),
-    monto_efectivo: Number(r.monto_efectivo || 0),
-    saldo: Number(r.saldo || 0),
-    observaciones: String(r.observaciones || ""),
-    estado_pago: (r.estado_pago === "a_pagar" ? "a_pagar" : "pagado") as
-      | "pagado"
-      | "a_pagar",
-    origen_clasificado: String(
-      r.origen_clasificado || "proveedores_varios"
-    ) as OrigenClasificado,
-    estado_conciliacion: String(
-      r.estado_conciliacion || "faltante_en_fudo"
-    ) as EstadoConciliacion,
-    posicion_actual: String(
-      r.posicion_actual || "gasto_externo"
-    ) as PosicionGasto,
-    fudo_expense_id: String(r.fudo_expense_id || ""),
-    diferencia_monto: Number(r.diferencia_monto || 0),
-    resuelto: Boolean(r.resuelto === 1 || r.resuelto === true),
-    resolucion_accion: String(r.resolucion_accion || ""),
-    resolucion_nota: String(r.resolucion_nota || ""),
-  }));
+  const items: ContableLedgerItem[] = rows.map((r) => {
+    const filaOrigen = Number(r.fila_origen || 1);
+    return {
+      id: Number(r.id),
+      hash: String(r.hash || ""),
+      hoja_mes: String(r.hoja_mes || hojaMes),
+      mes_key: String(r.mes_key || mesKey),
+      fila_origen: filaOrigen,
+      celda_ref: `B${filaOrigen}`,
+      sheet_cell_url: buildContableCellUrl(filaOrigen, "B"),
+      fecha: String(r.fecha || ""),
+      proveedor: String(r.proveedor || ""),
+      proveedor_key: String(r.proveedor_key || ""),
+      cuenta: String(r.cuenta || ""),
+      tipo: String(r.tipo || ""),
+      detalle: String(r.detalle || ""),
+      entrada_d: Number(r.entrada_d || 0),
+      salida_h: Number(r.salida_h || 0),
+      monto_efectivo: Number(r.monto_efectivo || 0),
+      saldo: Number(r.saldo || 0),
+      observaciones: String(r.observaciones || ""),
+      estado_pago: (r.estado_pago === "a_pagar" ? "a_pagar" : "pagado") as
+        | "pagado"
+        | "a_pagar",
+      origen_clasificado: String(
+        r.origen_clasificado || "proveedores_varios"
+      ) as OrigenClasificado,
+      estado_conciliacion: String(
+        r.estado_conciliacion || "faltante_en_fudo"
+      ) as EstadoConciliacion,
+      posicion_actual: String(
+        r.posicion_actual || "gasto_externo"
+      ) as PosicionGasto,
+      fudo_expense_id: String(r.fudo_expense_id || ""),
+      diferencia_monto: Number(r.diferencia_monto || 0),
+      resuelto: Boolean(r.resuelto === 1 || r.resuelto === true),
+      resolucion_accion: String(r.resolucion_accion || ""),
+      resolucion_nota: String(r.resolucion_nota || ""),
+    };
+  });
 
   const fudoExpenses = await loadFudoExpensesForMonth(mesKey);
   const matchedFudoIds = new Set(

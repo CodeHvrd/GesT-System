@@ -7,6 +7,7 @@ import {
   crossCheckContableWithFudo,
 } from "../src/lib/sheets/contable";
 import { parseCsv } from "../src/lib/sheets/sync";
+import { queryAll } from "../src/lib/db/local-db";
 import { evaluateScheduleStatus } from "../src/lib/scheduler";
 import {
   GET as getReconcile,
@@ -166,6 +167,15 @@ describe("Planilla Contable ('NOVIEMBRE 26' / 'DICIEMBRE 26') & Reconciliación 
     );
     expect(papeleraDisc).toBeDefined();
     expect(papeleraDisc.posicion_actual).toBe("gasto_externo");
+    expect(papeleraDisc.celda_ref).toBe("B4");
+    expect(papeleraDisc.sheet_cell_url).toContain("range=B4");
+
+    // Verificar que los ítems que NO son "Proveedores Varios" (Verduleria Chica, Obras sanitarias, Pago Sueldos Cocina)
+    // fueron guardados automáticamente como Gastos Externos en la DB y NO están en discrepancias_pendientes
+    const autoExternals = queryAll<Record<string, unknown>>(
+      "SELECT * FROM external_expenses WHERE mes_key = '2026-11' AND descripcion LIKE '[Contable Auto]%'"
+    );
+    expect(autoExternals.length).toBe(3);
 
     // Resolver la discrepancia de Papelera manteniéndola como Gasto Externo verificado y ajustando nota/monto
     const patchReq = new Request("http://localhost:3000/api/reconcile", {

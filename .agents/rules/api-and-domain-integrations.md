@@ -18,13 +18,13 @@ description: Reglas de integración con Fudo API, Planilla Contable Mensual (NOV
   8. `Saldo` (Saldo acumulado).
   9. `Observaciones` (ej. `"pagado 2/11"`, `"a pagar"`).
 
-## 2. Regla de Auditoría: `"Proveedores Varios"` vs Gastos Fudo
-- Cada fila donde `Cuenta` contenga `"Proveedores Varios"` se cruza contra los **Gastos de Fudo (`/expenses`)** del mismo período (comparando proveedor normalizado y monto con tolerancia a redondeos de efectivo).
-- **Si está en Fudo**: Se marca como `conciliado` (no se duplica como gasto externo).
-- **Si NO está en Fudo**:
-  1. Se genera una **notificación de discrepancia** para revisión operativa.
-  2. Se posiciona automáticamente como **Gasto Externo** (para reflejar el egreso real en la ecuación de resultados).
-  3. Se habilita su edición y resolución en **Neon DB / SQLite** mediante `/api/reconcile` (`confirmar_fudo`, `mantener_externo`, `reclasificar_fijo`, `editar_monto`, `ignorar`).
+## 2. Regla de Auditoría: `"Proveedores Varios"` <-> Gastos Fudo y Guardado Automático de Externos
+- Todos los gastos pasados en **Gastos de Fudo (`/expenses`)** deben estar pasados en la hoja Contable como **`"Proveedores Varios"`** (y viceversa).
+- Todo ítem de la hoja Contable cuya `Cuenta` **NO sea `"Proveedores Varios"`** se guarda **automáticamente como Gasto Externo en la DB (`external_expenses` en Neon y SQLite)** sin entrar en la bandeja de revisión.
+- **La Revisión muestra exclusivamente los gastos que NO están en ambas listas (`Gastos Fudo` <-> `"Proveedores Varios"` de Contables)**:
+  1. **En `"Proveedores Varios"` pero NO en Gastos Fudo**: Se notifica para revisión e incluye un **hipervínculo directo a la celda de Google Sheets donde está pasado** (`https://docs.google.com/spreadsheets/d/1gNitzY7n44UYr1FP-RFpIPchRT4A1oSh/edit?gid=1313414032#gid=1313414032&range=B{fila}`).
+  2. **En Gastos Fudo pero NO en `"Proveedores Varios"`**: Se notifica para revisión indicando que el gasto de Fudo no figura pasado como `"Proveedores Varios"` en la planilla Contable.
+  3. Se habilita su edición y resolución en **Neon DB / SQLite** mediante `/api/reconcile`.
 
 ## 3. Semántica de Gastos Fudo y Movimientos de Caja
 - **Gastos Fudo (`/expenses`)**: Compras de **ingredientes y materia prima** que actualizan el costo de los insumos y repercuten directamente en el CMV de las recetas.

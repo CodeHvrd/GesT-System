@@ -87,12 +87,13 @@ src/
    - Nombres de hojas por período mensual en español y mayúsculas: `"NOVIEMBRE 26"`, `"DICIEMBRE 26"`, `"ENERO 27"`, etc.
    - **Estructura exacta de columnas**:
      `Fecha | Descripción (Proveedor/Entidad) | Cuenta | Tipo | Descripción (Detalle) | Entrada (D) | Salida (H) | Saldo | Observaciones`
-   - **Regla de `"Proveedores Varios"`**:
-     - Todo ítem donde la columna `Cuenta` diga `"Proveedores Varios"` (ej. `"PROVEEDORES varios"`) debe ser verificado contra **Gastos Fudo** (datos de la API).
-     - Si el ítem **NO está pasado en Gastos Fudo** (o presenta discrepancia), el sistema debe:
-       1. **Notificarlo para revisión** en el panel de alertas/notificaciones y en la vista de conciliación.
-       2. **Posicionarlo automáticamente como Gasto Externo** para no subestimar los egresos reales del negocio.
-       3. **Permitir editar y resolver la discrepancia en la base de datos de Neon (y SQLite local)** (confirmar, vincular con Fudo, reclasificar o ajustar monto).
+   - **Regla de `"Proveedores Varios"` vs Gastos Fudo y Guardado Automático de Externos**:
+     - Todos los productos/compras pasados en **Gastos de Fudo** deben estar pasados en la hoja Contable como **`"Proveedores Varios"`** (y viceversa).
+     - Todo ítem de la hoja Contable cuya `Cuenta` **NO sea `"Proveedores Varios"`** (ej. servicios, impuestos, sueldos, alquiler, retiros de Caja Principal o Caja Grande) **NO va a revisión**: debe ser **guardado automáticamente como Gasto Externo en la DB (`external_expenses` en Neon y SQLite)**.
+     - **La Revisión es exclusivamente para los gastos que NO están en ambas listas (`Gastos Fudo` <-> `"Proveedores Varios"` de Contables)**:
+       1. Si un gasto está en `"Proveedores Varios"` (Sheets Contables) pero **NO está en Fudo**, se muestra en Revisión con un **hipervínculo directo a la celda de Google Sheets donde está pasado** (`#gid=1313414032&range=B{fila}`).
+       2. Si un gasto está en **Gastos Fudo** pero **NO está en `"Proveedores Varios"`** de la hoja Contable, se muestra en Revisión para que sea cargado o conciliado.
+       3. Permite editar y resolver la discrepancia en la base de datos de Neon (y SQLite local).
 5. **Clasificación y Discriminación de Gastos y Cajas**:
    - **Gastos de Fudo (`/expenses`)**: Son exclusivamente compras de **ingredientes y materia prima** que repercuten en el costo actualizado del producto (actualizan el valor del ingrediente en las recetas).
    - **Movimientos de Caja > `"Principal"`**: Son compras y retiros de la caja principal para pagar gastos operativos del día a día. Se cargan como **Gastos Externos (`Caja Principal`)** y se discriminan por rubro/concepto.

@@ -1046,6 +1046,8 @@ export async function expensesDetail(dFrom: string, dTo: string) {
       id: `cont-${item.hash}`,
       hash: item.hash,
       fecha: item.fecha,
+      celda_ref: item.celda_ref,
+      sheet_cell_url: item.sheet_cell_url,
       categoria:
         item.posicion_actual === "caja_principal"
           ? "Caja Principal (Día a Día)"
@@ -1069,6 +1071,16 @@ export async function expensesDetail(dFrom: string, dTo: string) {
       resuelto: item.resuelto,
     }));
 
+  const manualExtItems = ext.items.filter(
+    (e) => !String(e.descripcion || "").startsWith("[Contable Auto]")
+  );
+  const manualExtPuntuales = manualExtItems
+    .filter((e) => !e.es_fijo)
+    .reduce((a, e) => a + Number(e.monto_aplicado || e.monto || 0), 0);
+  const manualExtFijos = manualExtItems
+    .filter((e) => Boolean(e.es_fijo))
+    .reduce((a, e) => a + Number(e.monto_aplicado || e.monto || 0), 0);
+
   const movimientos = [
     ...contableMovs,
     ...sheetMovs.map((m) => ({
@@ -1083,7 +1095,7 @@ export async function expensesDetail(dFrom: string, dTo: string) {
       monto: round(Number(m.monto || 0)),
       es_fijo: false,
     })),
-    ...ext.items.map((e) => ({
+    ...manualExtItems.map((e) => ({
       id: `ext-${e.id}`,
       fecha: String(e.fecha || dFrom),
       categoria: String(e.categoria || "Gasto Externo"),
@@ -1097,9 +1109,9 @@ export async function expensesDetail(dFrom: string, dTo: string) {
   ].sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
 
   const externosPuntualesConsolidados = round(
-    ext.puntuales + contableExternos + cajaPrincipalTotal + cajaGrandeVariables
+    manualExtPuntuales + contableExternos + cajaPrincipalTotal + cajaGrandeVariables
   );
-  const externosFijosConsolidados = round(ext.fijos + cajaGrandeFijos);
+  const externosFijosConsolidados = round(manualExtFijos + cajaGrandeFijos);
 
   return {
     totales: {
@@ -1243,21 +1255,36 @@ export async function review(
     });
   }
 
-  // 5. Doble checkeo Planilla Contable ("Proveedores Varios") vs Gastos Fudo
+  // 5. Revisión Bidireccional: Gastos que NO están en ambas listas ("Proveedores Varios" <-> Gastos Fudo)
   const contableRev = expDet.contable_reconciliation;
-  if (contableRev && contableRev.discrepancias_pendientes.length > 0) {
-    const faltantes = contableRev.discrepancias_pendientes;
-    const totalFaltante = faltantes.reduce((acc, item) => acc + item.monto_efectivo, 0);
-    const ejemplosProv = Array.from(new Set(faltantes.slice(0, 4).map((f) => f.proveedor))).join(", ");
-    items.push({
-      id: "contable-proveedores-varios-sin-fudo",
-      nivel: faltantes.length > 3 || totalFaltante > 100000 ? "critico" : "atencion",
-      categoria: "Auditoría Contable / Fudo",
-      titulo: `${faltantes.length} ítems de "Proveedores Varios" (${contableRev.hoja_mes}) no figuran en Gastos Fudo`,
-      detalle: `Suman ${money(totalFaltante)} (${ejemplosProv}). Fueron posicionados automáticamente como Gasto Externo hasta verificar si son insumos de receta o compras externas.`,
-      accion: "Revisar y resolver cada discrepancia en Gastos > Auditoría Planilla Contable & Fudo.",
-      impacto: round(-totalFaltante),
-    });
+  if (contableRev) {
+    const faltantesEnFudo = contableRev.discrepancias_pendientes || [];
+    const faltantesEnContable = contableRev.fudo_sin_contable || [];
+    if (faltantesEnFudo.length > 0 || faltantesEnContable.length > 0) {
+      const totalSinFudo = faltantesEnFudo.reduce((acc, item) => acc + item.monto_efectivo, 0);
+      const totalSinContable = faltantesEnContable.reduce((acc, item) => acc + item.monto, 0);
+      const ejemplosSinFudo = faltantesEnFudo
+        .slice(0, 3)
+        .map((f) => `${f.proveedor} (celda ${f.celda_ref})`)
+        .join(", ");
+      const ejemplosSinContable = faltantesEnContable
+        .slice(0, 3)
+        .map((f) => f.proveedor)
+        .join(", ");
+      const totalDesfasaje = faltantesEnFudo.length + faltantesEnContable.length;
+
+      items.push({
+        id: "contable-proveedores-varios-sin-fudo",
+        nivel: totalDesfasaje > 3 || totalSinFudo + totalSinContable > 100000 ? "critico" : "atencion",
+        categoria: "Auditoría Contable / Fudo",
+        titulo: `${totalDesfasaje} gastos no figuran en ambas listas (${contableRev.hoja_mes} "Proveedores Varios" ↔ Fudo)`,
+        detalle:
+          `${faltantesEnFudo.length > 0 ? `Faltan en Fudo (${faltantesEnFudo.length} por ${money(totalSinFudo)}): ${ejemplosSinFudo}. ` : ""}` +
+          `${faltantesEnContable.length > 0 ? `Faltan en "Proveedores Varios" de Sheets (${faltantesEnContable.length} por ${money(totalSinContable)}): ${ejemplosSinContable}.` : ""}`,
+        accion: "Abrí Gastos > Revisión (No están en ambas listas) para ir directo a la celda en Sheets o resolver en Neon DB.",
+        impacto: round(-(totalSinFudo + totalSinContable)),
+      });
+    }
   }
 
   // 6. Diferencias de conciliación entre Fudo y Planilla Contable

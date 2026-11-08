@@ -1,11 +1,16 @@
 .git
 .gitignore
+.next
+node_modules
 .venv
+.venv-test
 venv
 __pycache__
 *.pyc
+legacy
 data
 docs
+tests
 .env
 .env.*
 config.json

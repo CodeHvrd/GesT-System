@@ -11,6 +11,7 @@ import {
   FlaskConical,
   FileSpreadsheet,
   Edit3,
+  ExternalLink,
 } from "lucide-react";
 import {
   Card,
@@ -112,6 +113,10 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
   const contableItems: Array<any> = activeContable?.items || [];
   const discrepanciasPendientes: Array<any> =
     activeContable?.discrepancias_pendientes || [];
+  const fudoSinContable: Array<any> =
+    activeContable?.fudo_sin_contable || [];
+  const totalRevisionCount =
+    discrepanciasPendientes.length + fudoSinContable.length;
 
   async function handleSyncLiveContableSheet() {
     setSyncingContable(true);
@@ -338,33 +343,31 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
 
         <Card
           className={
-            discrepanciasPendientes.length > 0
+            totalRevisionCount > 0
               ? "border-amber-500/60 bg-amber-500/5"
               : ""
           }
         >
           <CardHeader className="pb-2">
             <CardDescription>
-              Doble Checkeo Neon DB ({activeContable?.hoja_mes || hojaMesInput})
+              Revisión (`No están en ambas listas` · {activeContable?.hoja_mes || hojaMesInput})
             </CardDescription>
             <CardTitle className="text-xl font-bold flex items-center gap-2">
-              {discrepanciasPendientes.length > 0 ? (
+              {totalRevisionCount > 0 ? (
                 <>
                   <AlertTriangle className="h-5 w-5 text-amber-500" />
-                  <span>{discrepanciasPendientes.length} por revisar</span>
+                  <span>{totalRevisionCount} por revisar</span>
                 </>
               ) : (
                 <>
                   <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                  <span>Verificado</span>
+                  <span>Ambas listas conciliadas</span>
                 </>
               )}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-muted-foreground">
-            Proveedores Varios sin Fudo:{" "}
-            {money(contableTotales.proveedores_varios_faltantes_monto || 0)} (posicionados
-            como Gasto Externo)
+            Faltan en Fudo: {discrepanciasPendientes.length} ({money(contableTotales.proveedores_varios_faltantes_monto || 0)}) · Faltan en Sheets (&quot;Prov. Varios&quot;): {fudoSinContable.length}
           </CardContent>
         </Card>
       </div>
@@ -376,18 +379,11 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
             <div className="space-y-1">
               <CardTitle className="text-base flex items-center gap-2">
                 <FileSpreadsheet className="h-4 w-4 text-primary" />
-                Auditoría Planilla Contable (`Contables &gt; Mes`) vs Gastos Fudo &amp;
-                Cajas
+                Revisión Bidireccional: Gastos Fudo ↔ &quot;Proveedores Varios&quot; (`Contables &gt; Mes`)
               </CardTitle>
               <CardDescription>
-                Formato 9 columnas:{" "}
-                <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
-                  Fecha / Descripción / Cuenta / Tipo / Descripción / Entrada (D) / Salida
-                  (H) / Saldo / Observaciones
-                </code>
-                . Todo ítem con Cuenta <strong>&quot;Proveedores Varios&quot;</strong> que no
-                figure en Gastos Fudo se notifica para revisión y se posiciona como{" "}
-                <strong>Gasto Externo</strong>.
+                Los gastos pasados en <strong>Gastos Fudo</strong> deben estar en Sheets Contables como{" "}
+                <strong>&quot;Proveedores Varios&quot;</strong>. Todo gasto en Sheets que <strong>NO sea &quot;Proveedores Varios&quot;</strong> se guarda automáticamente como <strong>Gasto Externo en la DB</strong>. La revisión muestra únicamente los gastos que <strong>NO están en ambas listas</strong> (con hipervínculo directo a la celda en Sheets cuando falta en Fudo).
               </CardDescription>
             </div>
 
@@ -476,7 +472,7 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
                 className="h-7 text-xs"
                 onClick={() => setLedgerFilter("discrepancias")}
               >
-                Discrepancias Prov. Varios ({discrepanciasPendientes.length})
+                Revisión: No están en ambas listas ({totalRevisionCount})
               </Button>
               <Button
                 variant={ledgerFilter === "proveedores_varios" ? "default" : "outline"}
@@ -495,7 +491,7 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
                 className="h-7 text-xs"
                 onClick={() => setLedgerFilter("caja_principal")}
               >
-                Caja Principal (Día a día)
+                Externos Auto DB: Caja Principal
               </Button>
               <Button
                 variant={ledgerFilter === "caja_grande" ? "default" : "outline"}
@@ -503,7 +499,7 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
                 className="h-7 text-xs"
                 onClick={() => setLedgerFilter("caja_grande")}
               >
-                Caja Grande (Fijos / Variables)
+                Externos Auto DB: Caja Grande / Servicios
               </Button>
               <Button
                 variant={ledgerFilter === "todos" ? "default" : "outline"}
@@ -521,80 +517,93 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
               <TableRow>
                 <TableHead>Fecha</TableHead>
                 <TableHead>Proveedor (Desc. 1)</TableHead>
-                <TableHead>Cuenta / Tipo</TableHead>
+                <TableHead>Cuenta / Celda Sheets</TableHead>
                 <TableHead>Detalle / Obs.</TableHead>
                 <TableHead className="text-right">Entrada (D)</TableHead>
                 <TableHead className="text-right">Salida (H)</TableHead>
-                <TableHead>Estado Fudo</TableHead>
-                <TableHead>Posición en DB</TableHead>
+                <TableHead>Estado Cruce</TableHead>
+                <TableHead>Guardado en DB</TableHead>
                 <TableHead className="text-right">Resolver / Editar en Neon</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredContableItems.length === 0 ? (
+              {filteredContableItems.length === 0 &&
+              (ledgerFilter !== "discrepancias" || fudoSinContable.length === 0) ? (
                 <TableRow>
                   <TableCell colSpan={9} className="text-center text-muted-foreground py-6">
                     {contableItems.length === 0
                       ? `Hacé clic en "Sincronizar Hoja Contable" o en "Herramienta de Testeo" para auditar la hoja ${hojaMesInput}.`
-                      : "No hay registros en este filtro."}
+                      : "Todos los gastos de Proveedores Varios y Gastos Fudo están conciliados en ambas listas."}
                   </TableCell>
                 </TableRow>
               ) : (
-                filteredContableItems.slice(0, 80).map((item) => {
-                  const isEditing = editingHash === item.hash;
-                  return (
-                    <TableRow key={item.hash}>
-                      <TableCell className="text-xs whitespace-nowrap">
-                        {item.fecha}
-                      </TableCell>
-                      <TableCell className="font-medium text-xs">
-                        {item.proveedor}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        <div>{item.cuenta}</div>
-                        <div className="text-[11px] text-muted-foreground">
-                          {item.tipo}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate">
-                        {item.detalle || item.observaciones || "—"}
-                        {item.resolucion_nota && (
-                          <div className="text-[11px] text-primary font-medium">
-                            Nota: {item.resolucion_nota}
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right text-xs">
-                        {item.entrada_d > 0 ? money(item.entrada_d) : "—"}
-                      </TableCell>
-                      <TableCell className="text-right text-xs font-semibold">
-                        {isEditing ? (
-                          <Input
-                            type="number"
-                            step="any"
-                            value={editMonto}
-                            onChange={(e) => setEditMonto(e.target.value)}
-                            className="h-7 w-28 text-xs ml-auto"
-                          />
-                        ) : (
-                          money(item.monto_efectivo)
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {item.estado_conciliacion === "conciliado_fudo" ? (
-                          <Badge variant="success">En Gastos Fudo</Badge>
-                        ) : item.estado_conciliacion === "faltante_en_fudo" ? (
-                          <Badge variant="warning">Falta en Fudo</Badge>
-                        ) : item.estado_conciliacion === "discrepancia_monto" ? (
-                          <Badge variant="warning">
-                            Dif. Fudo ({money(item.diferencia_monto)})
-                          </Badge>
-                        ) : item.estado_conciliacion === "resuelto_manual" ? (
-                          <Badge variant="secondary">Resuelto en DB</Badge>
-                        ) : (
-                          <Badge variant="outline">No aplica a Fudo</Badge>
-                        )}
-                      </TableCell>
+                <>
+                  {filteredContableItems.slice(0, 80).map((item) => {
+                    const isEditing = editingHash === item.hash;
+                    return (
+                      <TableRow key={item.hash}>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          {item.fecha}
+                        </TableCell>
+                        <TableCell className="font-medium text-xs">
+                          {item.proveedor}
+                        </TableCell>
+                        <TableCell className="text-xs space-y-1">
+                          <div>{item.cuenta}</div>
+                          {item.sheet_cell_url && (
+                            <a
+                              href={item.sheet_cell_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary hover:underline"
+                              title={`Abrir celda ${item.celda_ref || `B${item.fila_origen}`} en Google Sheets (${item.hoja_mes})`}
+                            >
+                              <span>
+                                Celda {item.celda_ref || `B${item.fila_origen}`} en Sheets
+                              </span>
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate">
+                          {item.detalle || item.observaciones || "—"}
+                          {item.resolucion_nota && (
+                            <div className="text-[11px] text-primary font-medium">
+                              Nota: {item.resolucion_nota}
+                            </div>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right text-xs">
+                          {item.entrada_d > 0 ? money(item.entrada_d) : "—"}
+                        </TableCell>
+                        <TableCell className="text-right text-xs font-semibold">
+                          {isEditing ? (
+                            <Input
+                              type="number"
+                              step="any"
+                              value={editMonto}
+                              onChange={(e) => setEditMonto(e.target.value)}
+                              className="h-7 w-28 text-xs ml-auto"
+                            />
+                          ) : (
+                            money(item.monto_efectivo)
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {item.estado_conciliacion === "conciliado_fudo" ? (
+                            <Badge variant="success">En Ambas Listas</Badge>
+                          ) : item.estado_conciliacion === "faltante_en_fudo" ? (
+                            <Badge variant="warning">No está en Fudo</Badge>
+                          ) : item.estado_conciliacion === "discrepancia_monto" ? (
+                            <Badge variant="warning">
+                              Dif. Fudo ({money(item.diferencia_monto)})
+                            </Badge>
+                          ) : item.estado_conciliacion === "resuelto_manual" ? (
+                            <Badge variant="secondary">Resuelto en DB</Badge>
+                          ) : (
+                            <Badge variant="outline">Externo Automático (DB)</Badge>
+                          )}
+                        </TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-[11px]">
                           {item.posicion_actual === "gasto_externo"
@@ -687,7 +696,50 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
                       </TableCell>
                     </TableRow>
                   );
-                })
+                })}
+                {ledgerFilter === "discrepancias" &&
+                  fudoSinContable.map((fudoItem) => (
+                    <TableRow key={`fudo-only-${fudoItem.id}`}>
+                      <TableCell className="text-xs whitespace-nowrap">
+                        {fudoItem.fecha}
+                      </TableCell>
+                      <TableCell className="font-medium text-xs">
+                        {fudoItem.proveedor}
+                      </TableCell>
+                      <TableCell className="text-xs space-y-1">
+                        <div>Gastos Fudo ({fudoItem.categoria || "Insumos"})</div>
+                        <a
+                          href="https://docs.google.com/spreadsheets/d/1gNitzY7n44UYr1FP-RFpIPchRT4A1oSh/edit?gid=1313414032#gid=1313414032"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline"
+                          title="Abrir Planilla Contable para cargarlo como Proveedores Varios"
+                        >
+                          <span>Cargar en Sheets (&quot;Proveedores Varios&quot;)</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {fudoItem.descripcion || "Pasado en Gastos Fudo pero no en Proveedores Varios"}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">—</TableCell>
+                      <TableCell className="text-right text-xs font-semibold">
+                        {money(fudoItem.monto)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="warning">Falta en Sheets (&quot;Prov. Varios&quot;)</Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-[11px]">
+                          Gasto Fudo (Receta)
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right text-xs text-muted-foreground">
+                        Pasar como &quot;Proveedores Varios&quot;
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </>
               )}
             </TableBody>
           </Table>

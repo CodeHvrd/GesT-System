@@ -5,9 +5,15 @@ services:
     plan: free
     healthCheckPath: /healthz
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: DATABASE_URL
         sync: false
       - key: PORTAL_USER
         sync: false
       - key: PORTAL_PASS
+        sync: false
+      - key: FUDO_API_KEY
+        sync: false
+      - key: FUDO_API_SECRET
         sync: false

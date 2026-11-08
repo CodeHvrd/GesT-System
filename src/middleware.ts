@@ -4,8 +4,11 @@ export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (
+    pathname.startsWith("/healthz") ||
+    pathname.startsWith("/readyz") ||
     pathname.startsWith("/api/healthz") ||
     pathname.startsWith("/api/readyz") ||
+    pathname.startsWith("/api/health") ||
     pathname.startsWith("/_next") ||
     pathname === "/favicon.ico"
   ) {

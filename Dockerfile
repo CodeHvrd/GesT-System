@@ -1,17 +1,19 @@
-FROM python:3.12-slim
+FROM node:22-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
     HOST=0.0.0.0 \
     PORT=8080
 
 WORKDIR /app
 
-COPY cloud/requirements.txt cloud/requirements.txt
-RUN pip install --no-cache-dir -r cloud/requirements.txt
+COPY package.json package-lock.json ./
+RUN npm ci
 
-COPY app ./app
-COPY cloud ./cloud
+COPY tsconfig.json next.config.ts tailwind.config.ts postcss.config.mjs components.json ./
+COPY src ./src
+
+RUN mkdir -p /app/data && npm run build
 
 EXPOSE 8080
-CMD ["python", "-m", "cloud.server_pg"]
+CMD ["sh", "-c", "npx next start -H 0.0.0.0 -p ${PORT:-8080}"]

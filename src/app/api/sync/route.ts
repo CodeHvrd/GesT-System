@@ -1,20 +1,29 @@
 import { NextResponse } from "next/server";
 import { syncAllSheets, replaceSalesWeeks } from "@/lib/sheets/sync";
 import { syncAndReconcileContableMonth } from "@/lib/sheets/contable";
-import { loadConfig } from "@/lib/config";
+import { saveConfig } from "@/lib/config";
+import { setSetting } from "@/lib/db/local-db";
 import { FudoClient } from "@/lib/fudo/client";
 import {
   fetchSales,
   fetchFudoExpensesAndCashMovements,
   saveFudoExpensesAndCashToLocalDb,
+  resolveFudoCredentials,
+  saveFudoCredentialsEverywhere,
+  syncFudoToPostgres,
 } from "@/lib/fudo/sync";
-import { resolveDateRange, todayArgIso } from "@/lib/dates";
-import { evaluateScheduleStatus, runFullFudoAndContableSync } from "@/lib/scheduler";
+import { addDays, resolveDateRange, todayArgIso } from "@/lib/dates";
+import {
+  evaluateScheduleStatus,
+  runFullFudoAndContableSync,
+} from "@/lib/scheduler";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const autorun = searchParams.get("autorun") === "1" || searchParams.get("autorun") === "true";
+    const autorun =
+      searchParams.get("autorun") === "1" ||
+      searchParams.get("autorun") === "true";
     const status = evaluateScheduleStatus();
 
     if (autorun && status.should_run) {
@@ -73,30 +82,60 @@ export async function POST(request: Request) {
       results.sheets = await syncAllSheets();
     }
 
-    const [dFrom, dTo] = resolveDateRange(
+    const today = todayArgIso();
+    const [rawFrom, rawTo] = resolveDateRange(
       String(body.preset || "este-mes"),
       body.desde ? String(body.desde) : null,
       body.hasta ? String(body.hasta) : null
     );
-    const mesKey = String(body.mes || dTo.slice(0, 7) || todayArgIso().slice(0, 7));
+
+    // Garantizar que la sincronización de Fudo cubra siempre hasta hoy (hora ARG)
+    // y al menos los últimos 15 días o el inicio del período seleccionado.
+    const minRecentFrom = addDays(today, -15);
+    const dFrom = rawFrom < minRecentFrom ? rawFrom : minRecentFrom;
+    const dTo = rawTo > today ? rawTo : today;
+    const mesKey = String(body.mes || dTo.slice(0, 7) || today.slice(0, 7));
 
     if (mode === "all" || mode === "fudo") {
-      const cfg = loadConfig();
-      if (cfg.fudo_api_key && cfg.fudo_api_secret) {
+      const reqKey = body.api_key ? String(body.api_key).trim() : "";
+      const reqSecret = body.api_secret ? String(body.api_secret).trim() : "";
+      if (reqKey && reqSecret && reqSecret !== "••••••••") {
+        await saveFudoCredentialsEverywhere(reqKey, reqSecret);
+      }
+
+      const creds = await resolveFudoCredentials({
+        apiKey: reqKey || null,
+        apiSecret: reqSecret || null,
+      });
+
+      if (creds.apiKey && creds.apiSecret) {
         const client = new FudoClient({
-          apiKey: cfg.fudo_api_key,
-          apiSecret: cfg.fudo_api_secret,
-          authUrl: cfg.fudo_auth_url,
-          apiUrl: cfg.fudo_api_url,
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+          authUrl: creds.authUrl,
+          apiUrl: creds.apiUrl,
         });
         const fudoRes = await fetchSales(client, dFrom, dTo);
         if (fudoRes.lines.length > 0) {
           replaceSalesWeeks(fudoRes.lines);
         }
 
+        let expData:
+          | {
+              expenses: Awaited<
+                ReturnType<typeof fetchFudoExpensesAndCashMovements>
+              >["expenses"];
+              cash_principal: Awaited<
+                ReturnType<typeof fetchFudoExpensesAndCashMovements>
+              >["cash_principal"];
+              cash_grande: Awaited<
+                ReturnType<typeof fetchFudoExpensesAndCashMovements>
+              >["cash_grande"];
+            }
+          | undefined;
         let expensesInfo: Record<string, unknown> = {};
         try {
-          const expData = await fetchFudoExpensesAndCashMovements(
+          expData = await fetchFudoExpensesAndCashMovements(
             client,
             dFrom,
             dTo
@@ -109,24 +148,58 @@ export async function POST(request: Request) {
           expensesInfo = { warning: (expErr as Error).message };
         }
 
+        let pgInfo: Record<string, unknown> = {};
+        try {
+          const pgSync = await syncFudoToPostgres({
+            dFrom,
+            dTo,
+            pgSales: fudoRes.pgSales,
+            catalog: fudoRes.catalog,
+            expData,
+          });
+          pgInfo = {
+            pg_synced: pgSync.ok,
+            pg_sales_written: pgSync.sales_written,
+            pg_expenses_written: pgSync.expenses_written,
+          };
+        } catch (pgErr) {
+          pgInfo = {
+            pg_synced: false,
+            pg_error: (pgErr as Error).message,
+          };
+        }
+
+        const nowIso = new Date().toISOString();
+        setSetting("last_sync", nowIso);
+        saveConfig({ last_sync_at: nowIso, last_sync_status: "ok" });
+
         results.fudo = {
           ok: true,
           desde: dFrom,
           hasta: dTo,
           inserted: fudoRes.lines.length,
+          sales_closed: fudoRes.stats.sales_closed,
           stats: fudoRes.stats,
           ...expensesInfo,
+          ...pgInfo,
         };
       } else {
         results.fudo = {
           ok: false,
           skipped: true,
-          message: "Credenciales de Fudo no configuradas.",
+          needs_credentials: true,
+          message:
+            "Credenciales de Fudo no configuradas. Hacé clic en 'Fudo API' arriba a la derecha para ingresarlas.",
         };
       }
     }
 
-    if (mode === "all" || mode === "contable" || mode === "sheets" || mode === "fudo") {
+    if (
+      mode === "all" ||
+      mode === "contable" ||
+      mode === "sheets" ||
+      mode === "fudo"
+    ) {
       try {
         const contableRes = await syncAndReconcileContableMonth({ mesKey });
         results.contable = {
@@ -134,8 +207,10 @@ export async function POST(request: Request) {
           hoja_mes: contableRes.hoja_mes,
           mes_key: contableRes.mes_key,
           filas_procesadas: contableRes.totales.filas_procesadas,
-          proveedores_varios_conciliados: contableRes.totales.proveedores_varios_conciliados_count,
-          proveedores_varios_faltantes_en_fudo: contableRes.totales.proveedores_varios_faltantes_count,
+          proveedores_varios_conciliados:
+            contableRes.totales.proveedores_varios_conciliados_count,
+          proveedores_varios_faltantes_en_fudo:
+            contableRes.totales.proveedores_varios_faltantes_count,
           discrepancias_pendientes: contableRes.discrepancias_pendientes.length,
         };
       } catch (contErr) {

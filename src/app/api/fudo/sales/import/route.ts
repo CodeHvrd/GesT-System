@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { loadConfig } from "@/lib/config";
 import { FudoClient } from "@/lib/fudo/client";
-import { fetchSales } from "@/lib/fudo/sync";
+import {
+  fetchSales,
+  resolveFudoCredentials,
+  syncFudoToPostgres,
+} from "@/lib/fudo/sync";
 import { replaceSalesWeeks } from "@/lib/sheets/sync";
 import { resolveDateRange } from "@/lib/dates";
 
@@ -14,8 +17,8 @@ export async function POST(request: Request) {
       body = {};
     }
 
-    const cfg = loadConfig();
-    if (!cfg.fudo_api_key || !cfg.fudo_api_secret) {
+    const creds = await resolveFudoCredentials();
+    if (!creds.apiKey || !creds.apiSecret) {
       return NextResponse.json(
         { ok: false, error: "Credenciales de Fudo no configuradas." },
         { status: 400 }
@@ -29,14 +32,26 @@ export async function POST(request: Request) {
     );
 
     const client = new FudoClient({
-      apiKey: cfg.fudo_api_key,
-      apiSecret: cfg.fudo_api_secret,
-      authUrl: cfg.fudo_auth_url,
-      apiUrl: cfg.fudo_api_url,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      authUrl: creds.authUrl,
+      apiUrl: creds.apiUrl,
     });
 
     const res = await fetchSales(client, dFrom, dTo);
     const dbRes = replaceSalesWeeks(res.lines);
+    let pgRes: Record<string, unknown> = {};
+    try {
+      const pg = await syncFudoToPostgres({
+        dFrom,
+        dTo,
+        pgSales: res.pgSales,
+        catalog: res.catalog,
+      });
+      pgRes = { pg_synced: pg.ok, pg_sales_written: pg.sales_written };
+    } catch (e) {
+      pgRes = { pg_synced: false, pg_error: (e as Error).message };
+    }
 
     return NextResponse.json({
       ok: true,
@@ -45,6 +60,7 @@ export async function POST(request: Request) {
       inserted: dbRes.inserted,
       weeks: dbRes.weeks,
       stats: res.stats,
+      ...pgRes,
     });
   } catch (err) {
     return NextResponse.json(
@@ -53,4 +69,3 @@ export async function POST(request: Request) {
     );
   }
 }
-

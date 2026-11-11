@@ -1,23 +1,20 @@
 import { NextResponse } from "next/server";
-import { loadConfig } from "@/lib/config";
 import { FudoClient } from "@/lib/fudo/client";
+import { resolveFudoCredentials } from "@/lib/fudo/sync";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const cfg = loadConfig();
-    const apiKey = searchParams.get("api_key") || cfg.fudo_api_key;
-    const apiSecret =
-      searchParams.get("api_secret") &&
-      searchParams.get("api_secret") !== "••••••••"
-        ? searchParams.get("api_secret")!
-        : cfg.fudo_api_secret;
+    const creds = await resolveFudoCredentials({
+      apiKey: searchParams.get("api_key"),
+      apiSecret: searchParams.get("api_secret"),
+    });
 
     const client = new FudoClient({
-      apiKey,
-      apiSecret,
-      authUrl: cfg.fudo_auth_url,
-      apiUrl: cfg.fudo_api_url,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      authUrl: creds.authUrl,
+      apiUrl: creds.apiUrl,
     });
     const res = await client.health();
     return NextResponse.json(res, { status: res.ok ? 200 : 400 });
@@ -28,4 +25,3 @@ export async function GET(request: Request) {
     );
   }
 }
-

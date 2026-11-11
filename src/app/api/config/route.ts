@@ -5,6 +5,10 @@ import {
   targetsText,
   parseTargetsText,
 } from "@/lib/config";
+import {
+  resolveFudoCredentials,
+  saveFudoCredentialsEverywhere,
+} from "@/lib/fudo/sync";
 
 function sanitizeConfig(cfg: ReturnType<typeof loadConfig>) {
   const copy = { ...cfg } as Record<string, unknown>;
@@ -16,6 +20,7 @@ function sanitizeConfig(cfg: ReturnType<typeof loadConfig>) {
 
 export async function GET() {
   try {
+    await resolveFudoCredentials();
     const cfg = loadConfig();
     return NextResponse.json({
       ok: true,
@@ -32,6 +37,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Record<string, unknown>;
+    await resolveFudoCredentials();
     const current = loadConfig();
     const update: Record<string, unknown> = { ...body };
 
@@ -54,6 +60,13 @@ export async function POST(request: Request) {
     }
 
     const saved = saveConfig(update);
+    if (saved.fudo_api_key && saved.fudo_api_secret) {
+      await saveFudoCredentialsEverywhere(
+        saved.fudo_api_key,
+        saved.fudo_api_secret
+      );
+    }
+
     return NextResponse.json({
       ok: true,
       config: sanitizeConfig(saved),
@@ -65,4 +78,3 @@ export async function POST(request: Request) {
     );
   }
 }
-

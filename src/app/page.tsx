@@ -54,10 +54,10 @@ export default function HomePage() {
         if (ch) qs.set("canal", ch);
 
         const [dashRes, alertsRes, entRes, verRes] = await Promise.all([
-          fetch(`/api/dashboard?${qs.toString()}`),
-          fetch("/api/alerts"),
-          fetch("/api/entries"),
-          fetch("/api/version"),
+          fetch(`/api/dashboard?${qs.toString()}`, { cache: "no-store" }),
+          fetch("/api/alerts", { cache: "no-store" }),
+          fetch("/api/entries", { cache: "no-store" }),
+          fetch("/api/version", { cache: "no-store" }),
         ]);
 
         const dashJson = await dashRes.json();
@@ -167,8 +167,13 @@ export default function HomePage() {
       });
       const json = await res.json();
       if (json.ok && json.fudo?.ok) {
+        const count =
+          json.fudo.sales_closed ??
+          json.fudo.pg_sales_written ??
+          json.fudo.inserted ??
+          0;
         setBannerMsg(
-          `Fudo sincronizado: ${json.fudo.inserted} líneas importadas (${json.fudo.desde} al ${json.fudo.hasta}).`
+          `Fudo sincronizado: ${count} ventas cerradas actualizadas (${json.fudo.desde} al ${json.fudo.hasta}).`
         );
         await fetchAllData();
       } else {

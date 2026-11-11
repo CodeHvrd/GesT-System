@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { dashboard } from "@/lib/analytics/cloud-analytics";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -10,7 +12,10 @@ export async function GET(request: Request) {
       hasta: searchParams.get("hasta"),
       canal: searchParams.get("canal"),
     });
-    return NextResponse.json({ ok: true, ...data });
+    return NextResponse.json(
+      { ok: true, ...data },
+      { headers: { "Cache-Control": "no-store, max-age=0" } }
+    );
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: (err as Error).message },
@@ -18,4 +23,3 @@ export async function GET(request: Request) {
     );
   }
 }
-

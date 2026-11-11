@@ -5,9 +5,14 @@ import {
   fetchSales,
   fetchFudoExpensesAndCashMovements,
   saveFudoExpensesAndCashToLocalDb,
+  resolveFudoCredentials,
+  syncFudoToPostgres,
 } from "./fudo/sync";
 import { replaceSalesWeeks } from "./sheets/sync";
-import { syncAndReconcileContableMonth, contableTabNameForMonth } from "./sheets/contable";
+import {
+  syncAndReconcileContableMonth,
+  contableTabNameForMonth,
+} from "./sheets/contable";
 
 /**
  * Horarios programados por defecto en Hora Argentina (ART = UTC-3):
@@ -38,7 +43,6 @@ export function getArgDateParts(nowUtc: Date = new Date()): {
   minute: number;
   hhmm: string;
 } {
-  // Restamos 3 horas para llevar UTC a ART (UTC-3)
   const argTime = new Date(nowUtc.getTime() - 3 * 3600 * 1000);
   const year = argTime.getUTCFullYear();
   const month = String(argTime.getUTCMonth() + 1).padStart(2, "0");
@@ -46,7 +50,10 @@ export function getArgDateParts(nowUtc: Date = new Date()): {
   const hour = argTime.getUTCHours();
   const minute = argTime.getUTCMinutes();
   const dateIso = `${year}-${month}-${day}`;
-  const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(
+    2,
+    "0"
+  )}`;
   return { dateIso, hour, minute, hhmm };
 }
 
@@ -83,7 +90,6 @@ export function evaluateScheduleStatus(
   const lastSlot = String(cfg.last_scheduled_sync_slot || "");
   const alreadyRan = Boolean(slotKey && lastSlot === slotKey);
 
-  // Calcular próximo turno programado
   let nextSlotArg = scheduledHours[0] || "02:00";
   const sortedSlots = [...scheduledHours].sort();
   for (const slot of sortedSlots) {
@@ -113,7 +119,8 @@ export function evaluateScheduleStatus(
  * Ejecuta la sincronización programada o manual completa:
  * 1. Ventas e ítems de Fudo API
  * 2. Gastos Fudo (materia prima / ingredientes) + Movimientos de Caja (Principal y Caja Grande)
- * 3. Doble checkeo y conciliación con Planilla Contable del mes correspondiente
+ * 3. Persistencia en SQLite local y en Neon PostgreSQL
+ * 4. Doble checkeo y conciliación con Planilla Contable del mes correspondiente
  */
 export async function runFullFudoAndContableSync(options?: {
   daysBack?: number;
@@ -134,17 +141,18 @@ export async function runFullFudoAndContableSync(options?: {
     hoja_contable: contableTabNameForMonth(mesKey),
   };
 
-  const cfg = loadConfig();
-  if (cfg.fudo_api_key && cfg.fudo_api_secret) {
+  const creds = await resolveFudoCredentials();
+  if (creds.apiKey && creds.apiSecret) {
     const client = new FudoClient({
-      apiKey: cfg.fudo_api_key,
-      apiSecret: cfg.fudo_api_secret,
-      authUrl: cfg.fudo_auth_url,
-      apiUrl: cfg.fudo_api_url,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      authUrl: creds.authUrl,
+      apiUrl: creds.apiUrl,
     });
 
+    let fudoRes: Awaited<ReturnType<typeof fetchSales>> | null = null;
     try {
-      const fudoRes = await fetchSales(client, fromIso, todayIso);
+      fudoRes = await fetchSales(client, fromIso, todayIso);
       if (fudoRes.lines.length > 0) {
         replaceSalesWeeks(fudoRes.lines);
       }
@@ -157,8 +165,11 @@ export async function runFullFudoAndContableSync(options?: {
       results.fudo_sales = { ok: false, error: (err as Error).message };
     }
 
+    let expData: Awaited<
+      ReturnType<typeof fetchFudoExpensesAndCashMovements>
+    > | undefined;
     try {
-      const expData = await fetchFudoExpensesAndCashMovements(
+      expData = await fetchFudoExpensesAndCashMovements(
         client,
         fromIso,
         todayIso
@@ -169,7 +180,25 @@ export async function runFullFudoAndContableSync(options?: {
         ...savedExp,
       };
     } catch (err) {
-      results.fudo_expenses_and_cash = { ok: false, error: (err as Error).message };
+      results.fudo_expenses_and_cash = {
+        ok: false,
+        error: (err as Error).message,
+      };
+    }
+
+    if (fudoRes) {
+      try {
+        const pgSync = await syncFudoToPostgres({
+          dFrom: fromIso,
+          dTo: todayIso,
+          pgSales: fudoRes.pgSales,
+          catalog: fudoRes.catalog,
+          expData,
+        });
+        results.postgres_sync = pgSync;
+      } catch (err) {
+        results.postgres_sync = { ok: false, error: (err as Error).message };
+      }
     }
   } else {
     results.fudo_sales = {
@@ -193,7 +222,10 @@ export async function runFullFudoAndContableSync(options?: {
         reconciliation.discrepancias_pendientes?.length || 0,
     };
   } catch (err) {
-    results.contable_reconciliation = { ok: false, error: (err as Error).message };
+    results.contable_reconciliation = {
+      ok: false,
+      error: (err as Error).message,
+    };
   }
 
   const nowIso = new Date().toISOString();

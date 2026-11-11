@@ -22,8 +22,8 @@ jobs:
         run: npm ci --include=dev
       - name: Sincronizar Fudo + Contable
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
-          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
-          FUDO_API_KEY: ${{ secrets.FUDO_API_KEY || vars.FUDO_API_KEY }}
-          FUDO_API_SECRET: ${{ secrets.FUDO_API_SECRET || vars.FUDO_API_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT }}
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          FUDO_API_KEY: ${{ secrets.FUDO_API_KEY }}
+          FUDO_API_SECRET: ${{ secrets.FUDO_API_SECRET }}
         run: npx tsx scripts/cron-sync.ts

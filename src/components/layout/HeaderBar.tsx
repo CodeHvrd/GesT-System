@@ -65,8 +65,30 @@ export function HeaderBar({
   const [showFudoModal, setShowFudoModal] = useState(false);
   const [fudoKey, setFudoKey] = useState("");
   const [fudoSecret, setFudoSecret] = useState("");
+  const [hasExistingSecret, setHasExistingSecret] = useState(false);
   const [fudoStatus, setFudoStatus] = useState<string | null>(null);
   const [savingFudo, setSavingFudo] = useState(false);
+
+  // Cargar credenciales existentes cada vez que se abre el modal
+  useEffect(() => {
+    if (showFudoModal) {
+      setFudoStatus(null);
+      fetch("/api/config")
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.ok && data.config) {
+            if (data.config.fudo_api_key) {
+              setFudoKey(data.config.fudo_api_key);
+            }
+            if (data.config.has_fudo_secret) {
+              setHasExistingSecret(true);
+              setFudoSecret("••••••••");
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [showFudoModal]);
 
   // Verificación automática de horario programado Fudo (02:00 hs ARG y 16:00 hs ARG)
   useEffect(() => {
@@ -100,13 +122,16 @@ export function HeaderBar({
     setSavingFudo(true);
     setFudoStatus(null);
     try {
+      const payload: Record<string, string> = {
+        fudo_api_key: fudoKey,
+      };
+      if (fudoSecret && fudoSecret !== "••••••••") {
+        payload.fudo_api_secret = fudoSecret;
+      }
       const saveRes = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fudo_api_key: fudoKey,
-          fudo_api_secret: fudoSecret,
-        }),
+        body: JSON.stringify(payload),
       });
       const saveJson = await saveRes.json();
       if (!saveJson.ok) {
@@ -118,9 +143,10 @@ export function HeaderBar({
       const testJson = await testRes.json();
       if (testJson.ok) {
         setFudoStatus("Conexión con Fudo verificada correctamente.");
+        setHasExistingSecret(true);
         onCredentialsSaved();
       } else {
-        setFudoStatus(`Credenciales guardadas, pero Fudo respondió: ${testJson.error}`);
+        setFudoStatus(`Credenciales guardadas, pero Fudo respondió: ${testJson.error || testJson.status}`);
       }
     } catch (err) {
       setFudoStatus(`Error: ${(err as Error).message}`);
@@ -289,12 +315,14 @@ export function HeaderBar({
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-medium">Fudo API Secret</label>
+              <label className="text-xs font-medium">
+                Fudo API Secret {hasExistingSecret && <span className="text-[10px] text-muted-foreground font-normal">(Configurado)</span>}
+              </label>
               <Input
                 type="password"
                 value={fudoSecret}
                 onChange={(e) => setFudoSecret(e.target.value)}
-                placeholder="Tu apiSecret de Fudo"
+                placeholder={hasExistingSecret ? "Dejar igual para conservar" : "Tu apiSecret de Fudo"}
                 className="h-8 w-56"
               />
             </div>
@@ -320,4 +348,3 @@ export function HeaderBar({
     </header>
   );
 }
-

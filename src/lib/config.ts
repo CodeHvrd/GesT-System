@@ -1,11 +1,12 @@
 /**
- * Configuración persistente del sistema (`config.json`).
- * Migración 100% compatible con `app/config.py`.
+ * Configuración persistente del sistema (`config.json` + SQLite settings + Neon PostgreSQL `fudo_credentials`).
+ * Migración 100% compatible con `app/config.py` y `cloud/server_pg.py`.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { normKey, parsePercent, round } from "./format";
+import { getSetting, setSetting } from "./db/local-db";
 
 export const ROOT_DIR = process.cwd();
 export const DATA_DIR = path.join(ROOT_DIR, "data");
@@ -137,6 +138,7 @@ export function targetsText(targets: Record<string, number> | undefined): string
 
 export function loadConfig(customPath: string = CONFIG_PATH): AppConfig {
   const cfg: AppConfig = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+
   if (fs.existsSync(customPath)) {
     try {
       const raw = fs.readFileSync(customPath, "utf-8");
@@ -152,6 +154,22 @@ export function loadConfig(customPath: string = CONFIG_PATH): AppConfig {
       // ignore invalid config.json
     }
   }
+
+  // Si no están en config.json, intentar leer de SQLite settings (persistencia local permanente)
+  try {
+    if (!cfg.fudo_api_key) {
+      const dbKey = getSetting("fudo_api_key");
+      if (dbKey) cfg.fudo_api_key = dbKey.trim();
+    }
+    if (!cfg.fudo_api_secret) {
+      const dbSecret = getSetting("fudo_api_secret");
+      if (dbSecret) cfg.fudo_api_secret = dbSecret.trim();
+    }
+  } catch {
+    // ignore
+  }
+
+  // Variables de entorno de Render / Docker
   if (!cfg.fudo_api_key && process.env.FUDO_API_KEY) {
     cfg.fudo_api_key = process.env.FUDO_API_KEY.trim();
   }
@@ -178,10 +196,25 @@ export function saveConfig(
   } else if (next.sheet_id) {
     next.sheet_id = sheetIdFromUrl(next.sheet_id);
   }
+
+  // Escribir en config.json
   try {
     fs.writeFileSync(customPath, JSON.stringify(next, null, 2), "utf-8");
   } catch {
     // ignore read-only fs errors in restricted environments
   }
+
+  // Persistir siempre también en SQLite settings para que sobreviva recreaciones de contenedor
+  try {
+    if (next.fudo_api_key) {
+      setSetting("fudo_api_key", next.fudo_api_key);
+    }
+    if (next.fudo_api_secret) {
+      setSetting("fudo_api_secret", next.fudo_api_secret);
+    }
+  } catch {
+    // ignore
+  }
+
   return next;
 }

@@ -20,10 +20,10 @@ jobs:
           cache: "npm"
       - name: Instalar dependencias
         run: npm ci --include=dev
-      - name: Sincronizar Fudo + Contable → Postgres
+      - name: Sincronizar Fudo + Contable
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
           FUDO_API_KEY: ${{ secrets.FUDO_API_KEY || vars.FUDO_API_KEY }}
           FUDO_API_SECRET: ${{ secrets.FUDO_API_SECRET || vars.FUDO_API_SECRET }}
-        run: npx tsx -e "import { runFullFudoAndContableSync } from './src/lib/scheduler'; runFullFudoAndContableSync({ daysBack: 10 }).then(r => console.log('Resultado sync:', r)).catch(e => { console.error(e); process.exit(1); });"
+        run: npx tsx scripts/cron-sync.ts

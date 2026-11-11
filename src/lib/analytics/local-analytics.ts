@@ -560,23 +560,35 @@ export function buildAlerts(wk: string): AlertItem[] {
     });
   }
 
-  // 3. Variación de ventas semana vs semana anterior
+  // 3. Variación de ventas semana vs semana anterior (normalizada por días para evitar distorsiones entre semanas completas y fracciones como S5)
   if (cur.ingreso > 0 && prev.ingreso > 0) {
-    const chg = (cur.ingreso - prev.ingreso) / prev.ingreso;
+    const curDays = Math.max(1, Math.round((new Date(`${cur.fin}T00:00:00Z`).getTime() - new Date(`${cur.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+    const prevDays = Math.max(1, Math.round((new Date(`${prev.fin}T00:00:00Z`).getTime() - new Date(`${prev.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+    const curDailyAvg = cur.ingreso / curDays;
+    const prevDailyAvg = prev.ingreso / prevDays;
+    const isMismatch = curDays !== prevDays;
+    const chg = isMismatch
+      ? (curDailyAvg - prevDailyAvg) / prevDailyAvg
+      : (cur.ingreso - prev.ingreso) / prev.ingreso;
+
     if (chg <= -Number(cfg.alerta_caida_ventas_pct || 0.15)) {
       alerts.push({
         nivel: "critico",
         codigo: "ventas-semana",
-        titulo: `Caída de ventas de ${pct(Math.abs(chg))} vs ${prev.label}`,
-        detalle: `Ingresos pasaron de ${money(prev.ingreso)} a ${money(cur.ingreso)} (${signed(cur.ingreso - prev.ingreso, money)}).`,
+        titulo: `Caída de ventas de ${pct(Math.abs(chg))} vs ${prev.label}${isMismatch ? " (promedio diario)" : ""}`,
+        detalle: isMismatch
+          ? `Promedio diario pasó de ${money(prevDailyAvg)} (${prevDays} d) a ${money(curDailyAvg)} (${curDays} d). Facturación total: ${money(prev.ingreso)} vs ${money(cur.ingreso)}.`
+          : `Ingresos pasaron de ${money(prev.ingreso)} a ${money(cur.ingreso)} (${signed(cur.ingreso - prev.ingreso, money)}).`,
         impacto: round(cur.ingreso - prev.ingreso),
       });
     } else if (chg >= 0.15) {
       alerts.push({
         nivel: "ok",
         codigo: "ventas-semana",
-        titulo: `Suba de ventas de ${pct(chg)} vs ${prev.label}`,
-        detalle: `Ingresos crecieron de ${money(prev.ingreso)} a ${money(cur.ingreso)} (+${money(cur.ingreso - prev.ingreso)}).`,
+        titulo: `Suba de ventas de ${pct(chg)} vs ${prev.label}${isMismatch ? " (promedio diario)" : ""}`,
+        detalle: isMismatch
+          ? `Promedio diario creció de ${money(prevDailyAvg)} (${prevDays} d) a ${money(curDailyAvg)} (${curDays} d). Facturación total: ${money(prev.ingreso)} vs ${money(cur.ingreso)}.`
+          : `Ingresos crecieron de ${money(prev.ingreso)} a ${money(cur.ingreso)} (+${money(cur.ingreso - prev.ingreso)}).`,
         impacto: round(cur.ingreso - prev.ingreso),
       });
     }
@@ -737,8 +749,18 @@ export function weekNarrative(
   if (cur.ingreso > 0) {
     let l1 = `En **${cur.label}** las ventas sumaron **${money(cur.ingreso)}** con un CMV teórico de **${money(cur.costo)}** (**${pct(cur.cmv_pct)}**) y una ganancia bruta de **${money(cur.ganancia_bruta)}** (**${pct(cur.margen_bruto_pct)}**).`;
     if (prev.ingreso > 0) {
-      const diffPct = (cur.ingreso - prev.ingreso) / prev.ingreso;
-      l1 += ` Respecto a ${prev.label} (${money(prev.ingreso)}), la facturación varió **${signed(diffPct, pct)}**.`;
+      const curDays = Math.max(1, Math.round((new Date(`${cur.fin}T00:00:00Z`).getTime() - new Date(`${cur.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+      const prevDays = Math.max(1, Math.round((new Date(`${prev.fin}T00:00:00Z`).getTime() - new Date(`${prev.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+
+      if (curDays !== prevDays) {
+        const curAvg = cur.ingreso / curDays;
+        const prevAvg = prev.ingreso / prevDays;
+        const diffAvgPct = (curAvg - prevAvg) / prevAvg;
+        l1 += ` Respecto a ${prev.label} (${money(prev.ingreso)} en ${prevDays} días, promedio ${money(prevAvg)}/día), el promedio diario (${money(curAvg)}/día en ${curDays} días) varió **${signed(diffAvgPct, pct)}** (comparación normalizada por días).`;
+      } else {
+        const diffPct = (cur.ingreso - prev.ingreso) / prev.ingreso;
+        l1 += ` Respecto a ${prev.label} (${money(prev.ingreso)}), la facturación varió **${signed(diffPct, pct)}**.`;
+      }
     }
     lines.push(l1);
   }
@@ -774,11 +796,30 @@ export function buildWeekReport(wk?: string) {
   const samePrevM = sameWeekPrevMonth(targetWk);
   const prevMonthSameWk = samePrevM ? weekSummaryMetrics(samePrevM) : null;
 
+  const curDays = Math.max(1, Math.round((new Date(`${cur.fin}T00:00:00Z`).getTime() - new Date(`${cur.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+  const prevDays = Math.max(1, Math.round((new Date(`${prev.fin}T00:00:00Z`).getTime() - new Date(`${prev.inicio}T00:00:00Z`).getTime()) / 86400000) + 1);
+  const curDailyAvg = cur.ingreso / curDays;
+  const prevDailyAvg = prev.ingreso / prevDays;
+
   const productsByCat = weekProducts(targetWk);
-  const categorias = cur.categorias.map((c) => ({
-    ...c,
-    productos: productsByCat[c.key] || [],
-  }));
+  const categorias = cur.categorias.map((c) => {
+    const prods = (productsByCat[c.key] || []).sort((a, b) => b.ingreso - a.ingreso);
+    return {
+      ...c,
+      productos: prods,
+      productos_estrella: prods.slice(0, 5),
+    };
+  });
+
+  // Categoría con mayor CMV % (con ventas representativas > 0)
+  const catsWithCmv = [...categorias].filter((c) => c.ingreso > 0 && c.cmv_pct > 0);
+  catsWithCmv.sort((a, b) => b.cmv_pct - a.cmv_pct);
+  const maxCmvCategoria = catsWithCmv.length > 0 ? catsWithCmv[0] : null;
+
+  // Gastos Fudo específicos de la semana (insumos y materia prima)
+  const fudoExpenses = (cur.expenses?.por_categoria || [])
+    .filter((c) => !c.fijo)
+    .sort((a, b) => b.monto - a.monto);
 
   const allProds: ProductItem[] = [];
   for (const list of Object.values(productsByCat)) {
@@ -796,9 +837,12 @@ export function buildWeekReport(wk?: string) {
     label: cur.label,
     inicio: cur.inicio,
     fin: cur.fin,
+    dias_totales: curDays,
     status,
     resumen: {
       ingreso: cur.ingreso,
+      ingreso_promedio_diario: round(curDailyAvg),
+      dias_totales: curDays,
       costo: cur.costo,
       ganancia_bruta: cur.ganancia_bruta,
       cmv_pct: cur.cmv_pct,
@@ -819,7 +863,11 @@ export function buildWeekReport(wk?: string) {
       semana_anterior: {
         semana_key: prevWk,
         label: prev.label,
+        dias_actual: curDays,
+        dias_anterior: prevDays,
+        mismatch_dias: curDays !== prevDays,
         ingreso: compare(cur.ingreso, prev.ingreso),
+        promedio_diario: compare(curDailyAvg, prevDailyAvg),
         costo: compare(cur.costo, prev.costo),
         ganancia_bruta: compare(cur.ganancia_bruta, prev.ganancia_bruta),
         cmv_pct: compare(cur.cmv_pct, prev.cmv_pct),
@@ -837,6 +885,11 @@ export function buildWeekReport(wk?: string) {
         : null,
     },
     categorias,
+    max_cmv_categoria: maxCmvCategoria,
+    gastos_fudo: {
+      total: round(cur.gastos_reposicion),
+      items: fudoExpenses,
+    },
     top_productos: topProductos,
     top_rentables: topRentables,
     diario: daily,

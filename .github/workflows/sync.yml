@@ -14,15 +14,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
+          node-version: "22"
+          cache: "npm"
       - name: Instalar dependencias
-        run: python -m pip install --quiet -r cloud/requirements.txt
-      - name: Sincronizar Fudo → Postgres
+        run: npm ci --include=dev
+      - name: Sincronizar Fudo + Contable → Postgres
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT || secrets.DATABASE_URL || vars.DATABASE_URL_DIRECT || vars.DATABASE_URL }}
           FUDO_API_KEY: ${{ secrets.FUDO_API_KEY || vars.FUDO_API_KEY }}
           FUDO_API_SECRET: ${{ secrets.FUDO_API_SECRET || vars.FUDO_API_SECRET }}
-        run: python -m cloud.worker --once --days 10
+        run: npx tsx -e "import { runFullFudoAndContableSync } from './src/lib/scheduler'; runFullFudoAndContableSync({ daysBack: 10 }).then(r => console.log('Resultado sync:', r)).catch(e => { console.error(e); process.exit(1); });"

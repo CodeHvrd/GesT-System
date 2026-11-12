@@ -12,6 +12,7 @@ import { NotificacionesSection } from "@/components/dashboard/NotificacionesSect
 import { SemanalSection } from "@/components/admin/SemanalSection";
 import { MensualSection } from "@/components/admin/MensualSection";
 import { CargaGastosSection } from "@/components/admin/CargaGastosSection";
+import { FacturasSection } from "@/components/admin/FacturasSection";
 import { DatosSection } from "@/components/admin/DatosSection";
 import { EnlacesConfigSection } from "@/components/admin/EnlacesConfigSection";
 
@@ -281,6 +282,7 @@ export default function HomePage() {
               {activeTab === "carga" && (
                 <CargaGastosSection onEntriesChanged={() => fetchAllData()} />
               )}
+              {activeTab === "facturas" && <FacturasSection />}
               {activeTab === "datos" && <DatosSection />}
               {activeTab === "config" && (
                 <EnlacesConfigSection onConfigUpdated={() => fetchAllData()} />

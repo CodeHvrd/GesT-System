@@ -188,6 +188,30 @@ CREATE TABLE IF NOT EXISTS ingredient_prices (
     unit_price   REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS supplier_invoices (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id      TEXT UNIQUE,
+    fecha_emision    TEXT NOT NULL DEFAULT '',
+    fecha_vencimiento TEXT DEFAULT '',
+    proveedor        TEXT NOT NULL DEFAULT '',
+    proveedor_key    TEXT NOT NULL DEFAULT '',
+    categoria        TEXT DEFAULT '',
+    numero_factura   TEXT DEFAULT '',
+    descripcion      TEXT DEFAULT '',
+    monto            REAL NOT NULL DEFAULT 0,
+    estado_pago      TEXT NOT NULL DEFAULT 'pendiente', -- 'pendiente', 'pagado', 'anulado'
+    medio_pago       TEXT DEFAULT 'Cta. Corriente',
+    fecha_pago       TEXT DEFAULT '',
+    origen           TEXT DEFAULT 'fudo',
+    payload          TEXT,
+    creado_en        TEXT NOT NULL DEFAULT (datetime('now')),
+    actualizado_en   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_sinv_prov ON supplier_invoices(proveedor_key);
+CREATE INDEX IF NOT EXISTS ix_sinv_estado ON supplier_invoices(estado_pago);
+CREATE INDEX IF NOT EXISTS ix_sinv_venc ON supplier_invoices(fecha_vencimiento);
+CREATE INDEX IF NOT EXISTS ix_sinv_emision ON supplier_invoices(fecha_emision);
+
 CREATE TABLE IF NOT EXISTS contable_ledger (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     hash                TEXT UNIQUE,

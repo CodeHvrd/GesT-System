@@ -95,6 +95,36 @@ export async function pgExecute(
   });
 }
 
+export async function ensurePgSchema(): Promise<void> {
+  if (!hasPostgresUrl()) return;
+  await withPg(async (client) => {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS supplier_invoices (
+        id                BIGSERIAL PRIMARY KEY,
+        external_id       TEXT UNIQUE,
+        fecha_emision     DATE NOT NULL,
+        fecha_vencimiento DATE,
+        proveedor         TEXT NOT NULL,
+        proveedor_key     TEXT NOT NULL,
+        categoria         TEXT,
+        numero_factura    TEXT,
+        descripcion       TEXT,
+        monto             NUMERIC(14, 2) NOT NULL DEFAULT 0,
+        estado_pago       TEXT NOT NULL DEFAULT 'pendiente',
+        medio_pago        TEXT DEFAULT 'Cta. Corriente',
+        fecha_pago        DATE,
+        origen            TEXT DEFAULT 'fudo',
+        payload           JSONB,
+        creado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actualizado_en    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ix_pg_sinv_prov ON supplier_invoices(proveedor_key);
+      CREATE INDEX IF NOT EXISTS ix_pg_sinv_estado ON supplier_invoices(estado_pago);
+      CREATE INDEX IF NOT EXISTS ix_pg_sinv_venc ON supplier_invoices(fecha_vencimiento);
+    `);
+  });
+}
+
 export async function pgHealthCheck(): Promise<boolean> {
   try {
     const row = await pgQueryOne<{ ok: number }>("SELECT 1 AS ok");

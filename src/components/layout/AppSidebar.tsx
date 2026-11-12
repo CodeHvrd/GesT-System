@@ -12,6 +12,7 @@ import {
   PlusCircle,
   Database,
   Settings,
+  FileSpreadsheet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +52,12 @@ export function AppSidebar({
       group: "seccion_1",
       icon: PlusCircle,
       badge: pendingEntriesCount > 0 ? pendingEntriesCount : undefined,
+    },
+    {
+      id: "facturas",
+      label: "Facturas y Proveedores",
+      group: "seccion_1",
+      icon: FileSpreadsheet,
     },
     {
       id: "notificaciones",

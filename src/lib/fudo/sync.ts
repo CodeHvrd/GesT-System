@@ -684,12 +684,15 @@ export async function previewFudoSales(
 export interface FudoSyncedExpense {
   external_id: string;
   fecha: string;
+  fecha_vencimiento?: string;
   proveedor: string;
   proveedor_key: string;
   categoria: string;
+  numero_factura?: string;
   descripcion: string;
   monto: number;
   status?: string;
+  medio_pago?: string;
   origen_fudo: "insumo_receta" | "caja_principal" | "caja_grande";
   payload?: Record<string, unknown>;
 }
@@ -756,6 +759,13 @@ export async function fetchFudoExpensesAndCashMovements(
         const descripcion = norm(
           attrs.description || attrs.receiptNumber || ""
         );
+        const numeroFactura = norm(
+          attrs.receiptNumber || attrs.invoiceNumber || ""
+        );
+        const fechaVenc = attrs.dueDate ? String(attrs.dueDate).slice(0, 10) : "";
+        const medioPago = norm(
+          attrs.paymentMethod || attrs.paymentType || (attrs.paymentStatus === "pending" ? "Cta. Corriente" : "Efectivo")
+        );
         const textKey = `${normKey(categoria)} ${normKey(descripcion)} ${cajaNombre}`;
 
         let origenFudo: "insumo_receta" | "caja_principal" | "caja_grande" =
@@ -776,12 +786,19 @@ export async function fetchFudoExpensesAndCashMovements(
         const item: FudoSyncedExpense = {
           external_id: String(exp.id),
           fecha,
+          fecha_vencimiento: fechaVenc,
           proveedor: proveedor || descripcion || "Sin proveedor",
           proveedor_key: normProvider(proveedor || descripcion),
           categoria,
+          numero_factura: numeroFactura,
           descripcion,
           monto,
-          status: attrs.status ? String(attrs.status) : "cargado",
+          status: attrs.status
+            ? String(attrs.status)
+            : attrs.paymentStatus
+            ? String(attrs.paymentStatus)
+            : "cargado",
+          medio_pago: medioPago,
           origen_fudo: origenFudo,
           payload: exp as unknown as Record<string, unknown>,
         };
@@ -894,6 +911,48 @@ export function saveFudoExpensesAndCashToLocalDb(data: {
           e.proveedor_key,
           e.descripcion,
           e.monto,
+        ]
+      );
+
+      // Guardar también en supplier_invoices (Facturas de Proveedores)
+      const estadoPago =
+        e.status === "paid" || e.status === "pagado" || e.medio_pago === "Efectivo"
+          ? "pagado"
+          : "pendiente";
+      const medioPago = e.medio_pago || "Cta. Corriente";
+      const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 14);
+
+      executeSql(
+        `INSERT INTO supplier_invoices (
+          external_id, fecha_emision, fecha_vencimiento, proveedor, proveedor_key,
+          categoria, numero_factura, descripcion, monto, estado_pago, medio_pago,
+          origen, payload, actualizado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fudo', ?, datetime('now'))
+        ON CONFLICT(external_id) DO UPDATE SET
+          fecha_emision = excluded.fecha_emision,
+          fecha_vencimiento = COALESCE(NULLIF(excluded.fecha_vencimiento, ''), supplier_invoices.fecha_vencimiento),
+          proveedor = excluded.proveedor,
+          proveedor_key = excluded.proveedor_key,
+          categoria = excluded.categoria,
+          numero_factura = COALESCE(NULLIF(excluded.numero_factura, ''), supplier_invoices.numero_factura),
+          descripcion = excluded.descripcion,
+          monto = excluded.monto,
+          estado_pago = CASE WHEN supplier_invoices.estado_pago = 'pagado' THEN 'pagado' ELSE excluded.estado_pago END,
+          medio_pago = excluded.medio_pago,
+          actualizado_en = datetime('now')`,
+        [
+          e.external_id,
+          e.fecha,
+          fechaVenc,
+          e.proveedor,
+          e.proveedor_key,
+          e.categoria,
+          e.numero_factura || "",
+          e.descripcion,
+          e.monto,
+          estadoPago,
+          medioPago,
+          JSON.stringify(e.payload || {}),
         ]
       );
     }
@@ -1253,6 +1312,86 @@ export async function syncFudoToPostgres(params: {
                  payload = EXCLUDED.payload,
                  fetched_at = now()`,
           [venueId, JSON.stringify(expPayload)]
+        );
+
+        // Guardar facturas de proveedores también en supplier_invoices de Postgres
+        const invPayload = allFudoExp.map((e) => {
+          const estadoPago =
+            e.status === "paid" || e.status === "pagado" || e.medio_pago === "Efectivo"
+              ? "pagado"
+              : "pendiente";
+          const medioPago = e.medio_pago || "Cta. Corriente";
+          const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 14);
+          return {
+            external_id: e.external_id,
+            fecha_emision: e.fecha,
+            fecha_vencimiento: fechaVenc,
+            proveedor: e.proveedor || "Sin proveedor",
+            proveedor_key: e.proveedor_key || normProvider(e.proveedor || ""),
+            categoria: e.categoria || "",
+            numero_factura: e.numero_factura || "",
+            descripcion: e.descripcion || "",
+            monto: e.monto,
+            estado_pago: estadoPago,
+            medio_pago: medioPago,
+            payload: e.payload || {},
+          };
+        });
+
+        await pg.query(
+          `CREATE TABLE IF NOT EXISTS supplier_invoices (
+             id                BIGSERIAL PRIMARY KEY,
+             external_id       TEXT UNIQUE,
+             fecha_emision     DATE NOT NULL,
+             fecha_vencimiento DATE,
+             proveedor         TEXT NOT NULL,
+             proveedor_key     TEXT NOT NULL,
+             categoria         TEXT,
+             numero_factura    TEXT,
+             descripcion       TEXT,
+             monto             NUMERIC(14, 2) NOT NULL DEFAULT 0,
+             estado_pago       TEXT NOT NULL DEFAULT 'pendiente',
+             medio_pago        TEXT DEFAULT 'Cta. Corriente',
+             fecha_pago        DATE,
+             origen            TEXT DEFAULT 'fudo',
+             payload           JSONB,
+             creado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
+             actualizado_en    TIMESTAMPTZ NOT NULL DEFAULT now()
+           );
+           CREATE INDEX IF NOT EXISTS ix_pg_sinv_prov ON supplier_invoices(proveedor_key);
+           CREATE INDEX IF NOT EXISTS ix_pg_sinv_estado ON supplier_invoices(estado_pago);
+           CREATE INDEX IF NOT EXISTS ix_pg_sinv_venc ON supplier_invoices(fecha_vencimiento);`
+        );
+
+        await pg.query(
+          `INSERT INTO supplier_invoices (
+             external_id, fecha_emision, fecha_vencimiento, proveedor, proveedor_key,
+             categoria, numero_factura, descripcion, monto, estado_pago, medio_pago,
+             origen, payload, actualizado_en
+           )
+           SELECT x.external_id, x.fecha_emision::date, x.fecha_vencimiento::date,
+                  x.proveedor, x.proveedor_key, x.categoria, x.numero_factura,
+                  x.descripcion, x.monto, x.estado_pago, x.medio_pago,
+                  'fudo', x.payload, now()
+             FROM jsonb_to_recordset($1::jsonb) AS x(
+               external_id text, fecha_emision text, fecha_vencimiento text,
+               proveedor text, proveedor_key text, categoria text,
+               numero_factura text, descripcion text, monto numeric,
+               estado_pago text, medio_pago text, payload jsonb
+             )
+           ON CONFLICT (external_id) DO UPDATE
+             SET fecha_emision = EXCLUDED.fecha_emision,
+                 fecha_vencimiento = COALESCE(EXCLUDED.fecha_vencimiento, supplier_invoices.fecha_vencimiento),
+                 proveedor = EXCLUDED.proveedor,
+                 proveedor_key = EXCLUDED.proveedor_key,
+                 categoria = EXCLUDED.categoria,
+                 numero_factura = COALESCE(NULLIF(EXCLUDED.numero_factura, ''), supplier_invoices.numero_factura),
+                 descripcion = EXCLUDED.descripcion,
+                 monto = EXCLUDED.monto,
+                 estado_pago = CASE WHEN supplier_invoices.estado_pago = 'pagado' THEN 'pagado' ELSE EXCLUDED.estado_pago END,
+                 medio_pago = EXCLUDED.medio_pago,
+                 actualizado_en = now()`,
+          [JSON.stringify(invPayload)]
         );
         expensesWritten = allFudoExp.length;
       }

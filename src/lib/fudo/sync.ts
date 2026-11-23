@@ -920,7 +920,7 @@ export function saveFudoExpensesAndCashToLocalDb(data: {
           ? "pagado"
           : "pendiente";
       const medioPago = e.medio_pago || "Cta. Corriente";
-      const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 14);
+      const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 7);
 
       executeSql(
         `INSERT INTO supplier_invoices (
@@ -1321,7 +1321,7 @@ export async function syncFudoToPostgres(params: {
               ? "pagado"
               : "pendiente";
           const medioPago = e.medio_pago || "Cta. Corriente";
-          const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 14);
+          const fechaVenc = e.fecha_vencimiento || addDays(e.fecha, 7);
           return {
             external_id: e.external_id,
             fecha_emision: e.fecha,

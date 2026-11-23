@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { suggest } from "@/lib/analytics/local-analytics";
+import { hydrateLocalFromPostgres } from "@/lib/db/pg-sync";
 
 export async function GET(request: Request) {
   try {
+    await hydrateLocalFromPostgres();
     const { searchParams } = new URL(request.url);
     const q = searchParams.get("proveedor") || searchParams.get("q") || "";
     const data = suggest(q);
@@ -14,4 +16,3 @@ export async function GET(request: Request) {
     );
   }
 }
-

@@ -1317,7 +1317,7 @@ export function createEntry(input: Record<string, unknown>) {
   const creadoEn = new Date().toISOString();
 
   if (monto <= 0) {
-    return { ok: false, error: "El monto debe ser mayor a 0." };
+    return { ok: false as const, error: "El monto debe ser mayor a 0.", id: 0 };
   }
 
   return runTransaction(() => {
@@ -1352,7 +1352,7 @@ export function createEntry(input: Record<string, unknown>) {
     );
 
     return {
-      ok: true,
+      ok: true as const,
       id: entryId,
       entry: queryOne("SELECT * FROM entries WHERE id = ?", [entryId]),
     };

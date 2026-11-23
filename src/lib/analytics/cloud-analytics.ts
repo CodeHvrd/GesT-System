@@ -217,7 +217,7 @@ export async function externalAdd(payload: Record<string, unknown>) {
   const esFijo = Boolean(payload.es_fijo || payload.tipo === "fijo");
 
   if (monto <= 0) {
-    return { ok: false, error: "El monto debe ser mayor a 0." };
+    return { ok: false, error: "El monto debe ser mayor a 0.", id: 0 };
   }
 
   if (hasPostgresUrl()) {

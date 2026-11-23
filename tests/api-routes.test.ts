@@ -32,6 +32,13 @@ import { GET as getAlerts } from "../src/app/api/alerts/route";
 import { GET as getQuality } from "../src/app/api/quality/route";
 import { GET as getConfig } from "../src/app/api/config/route";
 import { GET as getWeekCsv } from "../src/app/api/export/week.csv/route";
+import {
+  GET as getInvoices,
+  POST as postInvoices,
+  PATCH as patchInvoices,
+} from "../src/app/api/invoices/route";
+import { POST as postScanInvoice } from "../src/app/api/invoices/scan/route";
+import { addDays, todayAr } from "../src/lib/dates";
 import { middleware } from "../src/middleware";
 
 describe("Next.js Divided API Routes & Auth Middleware", () => {
@@ -207,6 +214,90 @@ describe("Next.js Divided API Routes & Auth Middleware", () => {
     );
     expect(csvRes.status).toBe(200);
     expect(await csvRes.text()).toContain("Cafetería");
+  });
+
+  it("scans invoice photo text, autocompletes legible fields, flags illegible fields, and defaults due reminder to +7 days (editable)", async () => {
+    const today = todayAr();
+    const expectedDue7 = addDays(today, 7);
+
+    // 1. Escaneo completo legible
+    const scanFull = await (
+      await postScanInvoice(
+        new Request("http://localhost:3000/api/invoices/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ocr_text:
+              "FACTURA A N° 0004-00089412\nDistribuidora Café\nCUIT 30-71458963-9\nFecha de Emisión: 10/04/2026\nIMPORTE TOTAL: $ 145.800,50",
+          }),
+        })
+      )
+    ).json();
+    expect(scanFull.ok).toBe(true);
+    expect(scanFull.scanned.proveedor).toBe("Distribuidora Café");
+    expect(scanFull.scanned.numero_factura).toBe("0004-00089412");
+    expect(scanFull.scanned.monto).toBe(145800.5);
+    expect(scanFull.scanned.fecha_vencimiento).toBe(expectedDue7);
+    expect(scanFull.scanned.campos_incompletos.length).toBe(0);
+
+    // 2. Escaneo con partes borrosas / ilegibles (sin monto ni número de factura)
+    const scanBlurry = await (
+      await postScanInvoice(
+        new Request("http://localhost:3000/api/invoices/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ocr_text: "FACTURA A\nDistribuidora Café\nFecha: 10/04/2026",
+          }),
+        })
+      )
+    ).json();
+    expect(scanBlurry.ok).toBe(true);
+    expect(scanBlurry.scanned.proveedor).toBe("Distribuidora Café");
+    expect(scanBlurry.scanned.campos_incompletos).toContain("monto");
+    expect(scanBlurry.scanned.campos_incompletos).toContain("numero_factura");
+    expect(scanBlurry.scanned.fecha_vencimiento).toBe(expectedDue7);
+
+    // 3. Crear factura sin especificar vencimiento -> debe fijar default +7 días desde hoy
+    const created = await (
+      await postInvoices(
+        new Request("http://localhost:3000/api/invoices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            proveedor: "Distribuidora Café",
+            numero_factura: "0004-00089412",
+            monto: 145800.5,
+          }),
+        })
+      )
+    ).json();
+    expect(created.ok).toBe(true);
+    expect(created.fecha_vencimiento).toBe(expectedDue7);
+
+    // 4. Modificar manualmente el recordatorio de vencimiento y marcar como pagada
+    const customDue = addDays(today, 12);
+    const patched = await (
+      await patchInvoices(
+        new Request("http://localhost:3000/api/invoices", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            invoice_id: created.id,
+            fecha_vencimiento: customDue,
+            estado: "pagado",
+          }),
+        })
+      )
+    ).json();
+    expect(patched.ok).toBe(true);
+    expect(patched.fecha_vencimiento).toBe(customDue);
+
+    const list = await (
+      await getInvoices(new Request("http://localhost:3000/api/invoices?estado=pagado"))
+    ).json();
+    expect(list.ok).toBe(true);
+    expect(list.facturas[0].fecha_vencimiento).toBe(customDue);
   });
 
   it("enforces Basic Auth in middleware when PORTAL_PASS is set, while exempting /api/healthz", () => {

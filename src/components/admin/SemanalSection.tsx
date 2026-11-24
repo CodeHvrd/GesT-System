@@ -39,6 +39,7 @@ export function SemanalSection() {
   const [copiedType, setCopiedType] = useState<string | null>(null);
   const [expandedCats, setExpandedCats] = useState<Record<string, boolean>>({});
   const [expandedMaxCmv, setExpandedMaxCmv] = useState(false);
+  const [showFudoExpenses, setShowFudoExpenses] = useState(false);
 
   async function loadWeek(wk?: string) {
     setLoading(true);
@@ -465,25 +466,35 @@ export function SemanalSection() {
         </Card>
       )}
 
-      {/* 5. Gastos Fudo (Insumos y Materia Prima de la Semana) */}
+      {/* 5. Gastos Fudo (Insumos y Materia Prima de la Semana) en desplegable limpio */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <Receipt className="h-4 w-4 text-primary" />
-              <CardTitle className="text-base font-semibold">
+        <button
+          type="button"
+          onClick={() => setShowFudoExpenses(!showFudoExpenses)}
+          className="flex w-full items-center justify-between p-4 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <Receipt className="h-4 w-4 text-primary" />
+            <div>
+              <div className="text-sm font-semibold">
                 Gastos Fudo de la Semana (Insumos y Materia Prima)
-              </CardTitle>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Total Insumos: {money(r.gastos_reposicion || 0)} ({fudoExpenses.length} rubros)
+              </div>
             </div>
-            <CardDescription className="text-xs">
-              Compras de materia prima registradas en Fudo que impactan en el costo de los productos
-            </CardDescription>
           </div>
-          <Badge variant="outline" className="text-xs font-semibold">
-            Total Insumos: {money(r.gastos_reposicion || 0)}
+          <Badge variant="outline" className="gap-1 text-xs">
+            {showFudoExpenses ? "Ocultar" : "Ver desglose"}
+            {showFudoExpenses ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
           </Badge>
-        </CardHeader>
-        <CardContent>
+        </button>
+        {showFudoExpenses && (
+        <CardContent className="border-t pt-4">
           {fudoExpenses.length > 0 ? (
             <div className="rounded-md border">
               <Table>
@@ -521,6 +532,7 @@ export function SemanalSection() {
             </div>
           )}
         </CardContent>
+        )}
       </Card>
     </div>
   );

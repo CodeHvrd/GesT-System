@@ -194,12 +194,12 @@ export function HeaderBar({
 
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
             onClick={() => setShowFudoModal(!showFudoModal)}
             title="Configurar credenciales de Fudo API"
+            aria-label="Configurar credenciales de Fudo API"
           >
             <KeyRound className="h-4 w-4" />
-            <span className="hidden md:inline">Fudo API</span>
           </Button>
 
           <Button
@@ -211,17 +211,6 @@ export function HeaderBar({
             aria-label="Actualizar Fudo"
           >
             <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-          </Button>
-
-          <Button
-            variant="default"
-            size="sm"
-            onClick={onSyncAll}
-            disabled={syncing}
-            title="Sincronizar Planilla Google Sheets y Fudo"
-          >
-            <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-            <span>{syncing ? "Sincronizando..." : "Sincronizar Todo"}</span>
           </Button>
 
           {/* Popover de Notificaciones */}

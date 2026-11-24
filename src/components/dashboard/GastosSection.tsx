@@ -12,7 +12,11 @@ import {
   FileSpreadsheet,
   Edit3,
   ExternalLink,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
+import { CargaGastosSection } from "@/components/admin/CargaGastosSection";
+import { DatosSection } from "@/components/admin/DatosSection";
 import {
   Card,
   CardContent,
@@ -107,6 +111,9 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
   const [savingExt, setSavingExt] = useState(false);
   const [searchMov, setSearchMov] = useState("");
   const [originFilter, setOriginFilter] = useState("todos");
+  const [showQuickLoad, setShowQuickLoad] = useState(false);
+  const [showMovementsAccordion, setShowMovementsAccordion] = useState(false);
+  const [showQualityAccordion, setShowQualityAccordion] = useState(false);
 
   const activeContable = contableData || initialContable;
   const contableTotales = activeContable?.totales || {};
@@ -371,6 +378,40 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
           </CardContent>
         </Card>
       </div>
+
+      {/* Acordeón 1: Centro de Carga de Gastos y Cajas (cerrado por defecto) */}
+      <Card className="border-primary/25">
+        <button
+          type="button"
+          onClick={() => setShowQuickLoad(!showQuickLoad)}
+          className="flex w-full items-center justify-between p-4 text-left"
+        >
+          <div className="flex items-center gap-2.5">
+            <Plus className="h-4 w-4 text-primary" />
+            <div>
+              <div className="text-sm font-semibold">
+                Registrar Gasto o Comprobante (Caja Principal, Caja Grande o Factura)
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Carga rápida con autocompletado de proveedor, foto de comprobante y guardado directo en Neon DB
+              </div>
+            </div>
+          </div>
+          <Badge variant="outline" className="gap-1 text-xs">
+            {showQuickLoad ? "Ocultar" : "Cargar Gasto"}
+            {showQuickLoad ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+          </Badge>
+        </button>
+        {showQuickLoad && (
+          <CardContent className="border-t pt-4">
+            <CargaGastosSection onEntriesChanged={onRefresh} />
+          </CardContent>
+        )}
+      </Card>
 
       {/* Herramienta de Auditoría y Testeo: Planilla Contable ("NOVIEMBRE 26" / "DICIEMBRE 26") vs Fudo */}
       <Card className="border-primary/25">
@@ -746,6 +787,33 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
         </CardContent>
       </Card>
 
+      {/* Acordeón 2: Movimientos Detallados, Cajas y Totales por Proveedor */}
+      <Card>
+        <button
+          type="button"
+          onClick={() => setShowMovementsAccordion(!showMovementsAccordion)}
+          className="flex w-full items-center justify-between p-4 text-left"
+        >
+          <div>
+            <div className="text-sm font-semibold">
+              Historial de Movimientos ({filteredMovs.length}) y Totales por Proveedor
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Desplegá para buscar comprobantes individuales, comparar acumulados por proveedor o cargar retiros rápidos
+            </div>
+          </div>
+          <Badge variant="outline" className="gap-1 text-xs">
+            {showMovementsAccordion ? "Ocultar" : "Desplegar"}
+            {showMovementsAccordion ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+          </Badge>
+        </button>
+
+        {showMovementsAccordion && (
+          <CardContent className="border-t pt-4 space-y-6">
       {/* Carga Manual de Movimientos de Caja Principal / Caja Grande y Conciliación por Proveedor */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
@@ -1005,6 +1073,40 @@ export function GastosSection({ data, onRefresh }: GastosSectionProps) {
             </TableBody>
           </Table>
         </CardContent>
+      </Card>
+          </CardContent>
+        )}
+      </Card>
+
+      {/* Acordeón 3: Detector de Calidad de Datos, Duplicados y Explorador CSV */}
+      <Card>
+        <button
+          type="button"
+          onClick={() => setShowQualityAccordion(!showQualityAccordion)}
+          className="flex w-full items-center justify-between p-4 text-left"
+        >
+          <div>
+            <div className="text-sm font-semibold">
+              Detector de Calidad de Datos, Posibles Duplicados y Exportación CSV
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Auditoría de integridad de comprobantes y buscador histórico exportable
+            </div>
+          </div>
+          <Badge variant="outline" className="gap-1 text-xs">
+            {showQualityAccordion ? "Ocultar" : "Desplegar"}
+            {showQualityAccordion ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+          </Badge>
+        </button>
+        {showQualityAccordion && (
+          <CardContent className="border-t pt-4">
+            <DatosSection />
+          </CardContent>
+        )}
       </Card>
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Download } from "lucide-react";
+import { Download, ChevronDown, ChevronRight } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -24,6 +24,7 @@ export function MensualSection() {
   const [monthKey, setMonthKey] = useState<string>("");
   const [report, setReport] = useState<Record<string, any> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showMonthlyExpenses, setShowMonthlyExpenses] = useState(false);
 
   async function loadMonth(mk?: string) {
     setLoading(true);
@@ -151,15 +152,32 @@ export function MensualSection() {
         </CardContent>
       </Card>
 
-      {/* Gastos Mensuales por Rubro */}
+      {/* Gastos Mensuales por Rubro en desplegable */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Gastos del Mes por Categoría</CardTitle>
-          <CardDescription>
-            Distribución entre reposición de mercadería y estructura fija
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        <button
+          type="button"
+          onClick={() => setShowMonthlyExpenses(!showMonthlyExpenses)}
+          className="flex w-full items-center justify-between p-4 text-left"
+        >
+          <div>
+            <div className="text-sm font-semibold">
+              Gastos del Mes por Categoría ({gastosPorCat.length} rubros)
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Distribución entre reposición de mercadería y estructura fija
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium">
+            {showMonthlyExpenses ? "Ocultar" : "Ver rubros"}
+            {showMonthlyExpenses ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+          </span>
+        </button>
+        {showMonthlyExpenses && (
+        <CardContent className="border-t pt-4">
           <Table>
             <TableHeader>
               <TableRow>
@@ -187,6 +205,7 @@ export function MensualSection() {
             </TableBody>
           </Table>
         </CardContent>
+        )}
       </Card>
     </div>
   );

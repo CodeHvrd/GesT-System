@@ -109,8 +109,8 @@ export function FacturasSection() {
   const [expandedProv, setExpandedProv] = useState<Record<string, boolean>>({});
   const [markingId, setMarkingId] = useState<string | number | null>(null);
 
-  // Estado de carga de factura (Foto + Autocompletado + Manual)
-  const [showLoadCard, setShowLoadCard] = useState(true);
+  // Estado de carga de factura (Foto + Autocompletado + Manual) - cerrado por defecto para no saturar
+  const [showLoadCard, setShowLoadCard] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [scanningPhoto, setScanningPhoto] = useState(false);
   const [scanStatus, setScanStatus] = useState<string | null>(null);
@@ -222,6 +222,7 @@ export function FacturasSection() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setShowLoadCard(true);
     setScanningPhoto(true);
     setScanStatus(
       "Procesando foto de la factura y extrayendo datos legibles..."
@@ -465,22 +466,13 @@ export function FacturasSection() {
               </Button>
               <Button
                 type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowTextHelper(!showTextHelper)}
-                className="text-xs"
-              >
-                <Sparkles className="h-3.5 w-3.5" />
-                {showTextHelper ? "Ocultar Asistente Texto" : "Pegar Texto / Simular"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
+                variant={showLoadCard ? "secondary" : "outline"}
                 size="sm"
                 onClick={() => setShowLoadCard(!showLoadCard)}
-                className="text-xs"
+                className="text-xs gap-1"
               >
-                {showLoadCard ? "Minimizar" : "Expandir"}
+                <Plus className="h-3.5 w-3.5" />
+                {showLoadCard ? "Ocultar Formulario" : "Carga Manual"}
               </Button>
             </div>
           </div>
